@@ -10,7 +10,7 @@ import logging
 import sys
 from email_helper import enviar_email
 from db_dumper import create_dumper_from_env
-from storage_provider import create_storage_from_env
+from storage_provider import create_storage_from_env, LocalStorage
 
 # Carrega variáveis do .env
 load_dotenv()
@@ -110,9 +110,12 @@ def gerar_backup():
             "timezone": TIMEZONE_NAME,
         })
 
-        # Upload para o storage
+        # Upload / gravação do backup
         remote_path = storage.upload_file(backup_filepath, backup_filename, metadata)
-        log.info(f"✅ Backup enviado para {STORAGE_TYPE}: {remote_path}")
+        if isinstance(storage, LocalStorage):
+            log.info(f"✅ Backup salvo localmente: {remote_path}")
+        else:
+            log.info(f"✅ Backup enviado para {STORAGE_TYPE}: {remote_path}")
 
         data_hora_br = local_time.strftime("%d/%m/%Y às %H:%M:%S")
         enviar_email(
