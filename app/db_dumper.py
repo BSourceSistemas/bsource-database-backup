@@ -123,6 +123,43 @@ class MySQLDumper(DatabaseDumper):
         return ".sql"
 
 
+class MongoDumper(DatabaseDumper):
+    """Dump de bases de dados MongoDB via mongodump."""
+
+    def __init__(
+        self,
+        host: str,
+        port: str,
+        user: str,
+        password: str,
+        database: str,
+        auth_source: str = "admin",
+    ):
+        super().__init__(host, port, user, password, database, db_type="mongodb")
+        self.auth_source = auth_source
+
+    def dump(self, output_path: str) -> str:
+        command = (
+            f"mongodump --host={self.host} --port={self.port} "
+            f"--username={self.user} --password={self.password} "
+            f"--authenticationDatabase={self.auth_source} "
+            f"--db={self.database} "
+            f"--archive={output_path} --gzip"
+        )
+
+        log.info(
+            f"Executando: mongodump --host={self.host} --port={self.port} "
+            f"--username={self.user} --password=****** "
+            f"--authenticationDatabase={self.auth_source} "
+            f"--db={self.database} --archive={output_path} --gzip"
+        )
+        subprocess.run(command, shell=True, check=True)
+        return output_path
+
+    def get_file_extension(self) -> str:
+        return ".gz"
+
+
 class MSSQLDumper(DatabaseDumper):
     """Dump de bases de dados SQL Server via sqlcmd."""
 
@@ -159,6 +196,7 @@ _DUMPER_MAP = {
     "mysql": MySQLDumper,
     "mariadb": MySQLDumper,
     "mssql": MSSQLDumper,
+    "mongodb": MongoDumper,
 }
 
 SUPPORTED_DB_TYPES = list(_DUMPER_MAP.keys())
@@ -199,6 +237,14 @@ def create_dumper_from_env() -> DatabaseDumper:
         return dumper_class(
             host=host, port=port, user=user,
             password=password, database=database, db_type=db_type,
+        )
+
+    # MongoDumper aceita auth_source para configurar a base de autenticação
+    if db_type == "mongodb":
+        auth_source = os.getenv("DB_AUTH_SOURCE", "admin")
+        return dumper_class(
+            host=host, port=port, user=user,
+            password=password, database=database, auth_source=auth_source,
         )
 
     return dumper_class(

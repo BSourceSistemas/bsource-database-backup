@@ -30,10 +30,11 @@
    ┌─────────────────┐              ┌─────────────────┐
    │  DatabaseDumper  │ (ABC)       │ StorageProvider  │ (ABC)
    ├─────────────────┤              ├─────────────────┤
-   │ PostgresDumper   │              │ R2Storage        │
-   │ MySQLDumper      │              │ S3Storage        │
-   │ MSSQLDumper      │              └─────────────────┘
-   └─────────────────┘
+   │ PostgresDumper   │              │ S3StorageProvider│ (ABC)
+   │ MySQLDumper      │              │  ├─ R2Storage    │
+   │ MSSQLDumper      │              │  └─ S3Storage    │
+   │ MongoDumper      │              │ LocalStorage     │
+   └─────────────────┘              └─────────────────┘
 ```
 
 ## 🔄 Fluxo de Execução
@@ -52,6 +53,7 @@
 | `mysql` | MySQL | `mysqldump` | `.sql` | Single-transaction, routines, triggers |
 | `mariadb` | MariaDB | `mysqldump` | `.sql` | Mesma ferramenta que MySQL — retrocompatível |
 | `mssql` | SQL Server | `sqlcmd` | `.bak` | `BACKUP DATABASE` com compressão |
+| `mongodb` | MongoDB | `mongodump` | `.gz` | Archive comprimido com gzip; `DB_AUTH_SOURCE` configurável |
 
 ### DatabaseDumper (ABC)
 
@@ -69,13 +71,18 @@ A factory `create_dumper_from_env()` seleciona a implementação com base na var
 |--------------|----------|--------|----------|
 | `r2` | Cloudflare R2 | `auto` (fixo) | Obrigatório |
 | `s3` | AWS S3 | Configurável (`STORAGE_REGION`) | Opcional |
+| `local` | Disco local | — | — |
 
 ### StorageProvider (ABC)
 
-Ambas as implementações utilizam `boto3` (SDK AWS) com:
+`S3StorageProvider` (subclasse de `StorageProvider`) é a base para providers S3-compatible (`R2Storage` e `S3Storage`), utilizando `boto3` com:
 - **Lazy loading** do client S3 — criado apenas no primeiro uso
 - **Organização por data** — arquivos agrupados em `destination_folder/YYYYMMDD/filename`
 - **Metadados** — cada upload inclui tipo de backup, database, timestamp e timezone
+
+`LocalStorage` (subclasse de `StorageProvider`) grava os backups diretamente no disco:
+- **Organização por data** — arquivos agrupados em `STORAGE_LOCAL_PATH/YYYYMMDD/filename`
+- **Metadados** — ignorados (não aplicável para armazenamento local)
 
 A factory `create_storage_from_env()` seleciona a implementação com base na variável `STORAGE_TYPE`.
 
@@ -97,7 +104,7 @@ A factory `create_storage_from_env()` seleciona a implementação com base na va
 | Email | smtplib (SMTP + TLS) |
 | Configuração | python-dotenv (.env) |
 | Container | Docker (python:3.11-slim) |
-| DB Clients | pg_dump, mysqldump, sqlcmd |
+| DB Clients | pg_dump, mysqldump, sqlcmd, mongodump |
 
 ## 🐳 Docker
 
@@ -106,5 +113,6 @@ A imagem Docker (`python:3.11-slim`) inclui todos os clientes de base de dados:
 - `postgresql-client` — para `pg_dump`
 - `default-mysql-client` — para `mysqldump` (compatível com MySQL e MariaDB)
 - `mssql-tools18` + `msodbcsql18` — para `sqlcmd` (SQL Server)
+- `mongodb-database-tools` — para `mongodump` (MongoDB)
 
 A imagem é executada com um usuário não-root (`backup`) por segurança. O tipo de base de dados a utilizar é selecionado via `DB_TYPE` no `.env` — a mesma imagem serve para qualquer engine.

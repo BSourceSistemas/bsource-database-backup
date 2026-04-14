@@ -7,7 +7,7 @@ LABEL version="3.0.0"
 
 WORKDIR /app
 
-# Instalar dependências do sistema: clientes de PostgreSQL, MySQL/MariaDB e SQL Server
+# Instalar dependências do sistema: clientes de PostgreSQL, MySQL/MariaDB, SQL Server e MongoDB
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
@@ -22,6 +22,12 @@ RUN apt-get update && \
     ACCEPT_EULA=Y apt-get install -y --no-install-recommends \
         msodbcsql18 \
         mssql-tools18 && \
+    # Repositório MongoDB para mongodb-database-tools (mongodump)
+    curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-8.0.gpg && \
+    echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/debian bookworm/mongodb-org/8.0 main" > /etc/apt/sources.list.d/mongodb-org-8.0.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        mongodb-database-tools && \
     rm -rf /var/lib/apt/lists/*
 
 # Adicionar mssql-tools ao PATH
