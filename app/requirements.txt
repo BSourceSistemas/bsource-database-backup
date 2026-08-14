@@ -1,6 +1,2 @@
-seqlog>=0.3.31
-boto3>=1.26.0
-python-dotenv
-apscheduler
-croniter
-pytz>=2023.3
+# Compatibility requirements file; pyproject.toml is the source of truth.
+-e ..

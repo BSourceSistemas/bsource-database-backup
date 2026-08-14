@@ -1,224 +1,120 @@
 # BSource Database Backup
 
-Sistema automatizado de backup de bases de dados com suporte a múltiplos engines e storage providers, notificações por email e logging estruturado.
+Serviço de backup em que cada contêiner protege exatamente um banco, com execução segura dos clientes, validação do dump, upload verificável, scheduler, healthchecks e métricas.
 
-## 🚀 Funcionalidades
+## Bancos e formatos
 
-- ✅ Backup automatizado de bases de dados **PostgreSQL**, **MySQL**, **MariaDB** e **SQL Server**
-- ☁️ Upload automático para **Cloudflare R2** ou **AWS S3**
-- 📧 Notificações por email de sucesso/erro
-- 📊 Logging estruturado com integração SEQ (opcional)
-- ⏰ Agendamento flexível via CRON
-- 🐳 Containerizado com Docker
+| `DB_TYPE` | Versões de servidor | Formato | Validação antes do upload |
+|---|---|---|---|
+| `postgres` | 15–17 | custom `.dump` | `pg_restore --list` |
+| `mysql` | 8.0/8.4 | `.sql` | validação estrutural |
+| `mariadb` | 10.11/11.4 | `.sql` | validação estrutural |
+| `mongodb` | 7/8 | `.archive.gz` | `mongorestore --dryRun` |
+| `mssql` | 2019/2022 | `.bak` | volume compartilhado e `RESTORE VERIFYONLY` |
 
-## 🛠️ Configuração
+MySQL e MariaDB usam clientes distintos. SQL Server remoto sem filesystem compartilhado não é suportado.
 
-### 1. Pré-requisitos
-
-- Python 3.9+
-- Docker (opcional)
-- Cliente do banco de dados correspondente ao `DB_TYPE` configurado:
-  - PostgreSQL: `pg_dump`
-  - MySQL/MariaDB: `mysqldump`
-  - SQL Server: `sqlcmd`
-- Conta no Cloudflare R2 ou AWS S3
-
-### 2. Configuração do Storage
-
-#### Cloudflare R2
-
-1. Acesse o painel do Cloudflare > R2 Object Storage
-2. Crie um bucket para os backups
-3. Em "Manage R2 API tokens", crie um token com permissões Object Read & Write
-4. Anote o Endpoint URL, Access Key ID e Secret Access Key
-5. Configure `STORAGE_TYPE=r2` no `.env`
-
-#### AWS S3
-
-1. Crie um bucket S3 na região desejada
-2. Crie um IAM user com permissões `s3:PutObject` e `s3:ListBucket`
-3. Anote Access Key ID e Secret Access Key
-4. Configure `STORAGE_TYPE=s3` e `STORAGE_REGION` no `.env`
-
-### 3. Variáveis de ambiente
-
-Copie o arquivo `.env.example` para `.env` e configure:
+## Execução
 
 ```bash
-cp .env.example .env
+backup config check
+backup database check
+backup storage check
+backup run
+backup status --json
+backup scheduler
 ```
 
-### 4. Instalação
+`RUN_MODE=once` executa uma vez e encerra. `RUN_MODE=scheduler` inicia o scheduler e a API em `:8080`. Os códigos de `backup run` são:
 
-#### Usando Python (desenvolvimento):
+| Código | Resultado |
+|---:|---|
+| 0 | backup e verificação concluídos |
+| 1 | configuração inválida |
+| 2 | preflight ou conexão |
+| 3 | dump |
+| 4 | validação |
+| 5 | upload |
+| 6 | verificação do upload |
+| 7 | cancelamento |
+
+Falha exclusiva de notificação mantém código `0`.
+
+## Endpoints
+
+- `GET /health/live`: processo e scheduler ativos.
+- `GET /health/ready`: configuração e cliente local aptos.
+- `GET /status`: último resultado, próxima execução e degradação.
+- `GET /metrics`: métricas Prometheus.
+
+Os endpoints não possuem autenticação e devem permanecer em rede interna.
+
+## SQL Server com volume compartilhado
+
+O caminho usado por `BACKUP DATABASE ... TO DISK` pertence ao SQL Server. Para o serviço conseguir validar e enviar o `.bak`, os dois contêineres devem montar o mesmo volume:
+
+```yaml
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-CU20-ubuntu-22.04
+    volumes:
+      - mssql-backups:/var/opt/mssql/backup
+
+  backup:
+    image: bsourcedev/bsource-database-backup:sha-COMMIT
+    environment:
+      DB_TYPE: mssql
+      DB_HOST: sqlserver
+      DB_PORT: "1433"
+      MSSQL_BACKUP_MODE: shared-volume
+      MSSQL_SERVER_BACKUP_DIR: /var/opt/mssql/backup
+      MSSQL_LOCAL_BACKUP_DIR: /shared/mssql
+    volumes:
+      - mssql-backups:/shared/mssql
+
+volumes:
+  mssql-backups:
+```
+
+O deployment precisa conceder ao usuário do backup leitura e remoção dos arquivos criados pelo usuário `mssql`. Cada arquivo recebe um nome UUID novo; se o SQL Server gravar em outro filesystem, a execução falha porque o arquivo não aparece em `MSSQL_LOCAL_BACKUP_DIR`.
+
+O backup usa `COPY_ONLY`, `CHECKSUM` e `RESTORE VERIFYONLY`. A CI também deve realizar restore real, pois `VERIFYONLY` não valida semanticamente todo o banco.
+
+## Segredos
+
+Cada segredo aceita valor direto ou arquivo, nunca ambos:
+
+- `DB_PASSWORD_FILE`
+- `AWS_ACCESS_KEY_ID_FILE`
+- `AWS_SECRET_ACCESS_KEY_FILE`
+- `SMTP_PASSWORD_FILE`
+- `SEQ_API_KEY_FILE`
+
+Arquivos devem existir, não estar vazios e não ser graváveis por terceiros. Nenhum valor é incluído em argumentos dos processos, estado, endpoints ou logs.
+
+## Object keys e integridade
+
+```text
+{prefix}/{environment}/{databaseType}/{databaseName}/YYYY/MM/DD/
+{timestampUTC}-{runId}.{extension}
+```
+
+O serviço calcula SHA-256, envia tamanho/checksum como metadata e executa `HEAD` depois do upload. ETag não é tratado como checksum de multipart. Storage local realiza cópia atômica e recalcula SHA-256 no destino.
+
+## Compatibilidade de configuração
+
+As variáveis v3 `DB_*`, `STORAGE_*`, `EMAIL_*`, `APP_ENV` e `SEQ_*` continuam aceitas. `BACKUP_CRON` e `BACKUP_TIMEZONE` prevalecem sobre os aliases depreciados `CRON_SCHEDULE` e `TIMEZONE`. Variáveis v2 `PG_*` e `R2_*` não são reintroduzidas.
+
+Consulte [.env.example](.env.example) para a lista completa.
+
+## Desenvolvimento
+
 ```bash
-cd app
-pip install -r requirements.txt
-python main.py
+python -m venv .venv
+.venv/Scripts/python -m pip install -e ".[dev]"
+.venv/Scripts/python -m pytest
+.venv/Scripts/python -m ruff check app tests
+.venv/Scripts/python -m mypy app
 ```
 
-#### Usando Docker (produção):
-```bash
-docker-compose up -d
-```
-
-## 📋 Variáveis de Ambiente
-
-### Base de Dados
-
-| Variável | Descrição | Padrão | Obrigatória |
-|----------|-----------|--------|-------------|
-| `DB_TYPE` | Tipo de base de dados (`postgres`, `mysql`, `mariadb`, `mssql`) | - | ✅ |
-| `DB_HOST` | Host da base de dados | - | ✅ |
-| `DB_PORT` | Porta da base de dados | - | ✅ |
-| `DB_USER` | Usuário da base de dados | - | ✅ |
-| `DB_PASSWORD` | Senha da base de dados | - | ✅ |
-| `DB_DATABASE` | Nome da base de dados | - | ✅ |
-
-### Storage
-
-| Variável | Descrição | Padrão | Obrigatória |
-|----------|-----------|--------|-------------|
-| `STORAGE_TYPE` | Tipo de storage (`r2`, `s3`) | - | ✅ |
-| `STORAGE_ENDPOINT_URL` | URL do endpoint | - | ✅ (R2) / ❌ (S3) |
-| `STORAGE_ACCESS_KEY_ID` | Access Key do storage | - | ✅ |
-| `STORAGE_SECRET_ACCESS_KEY` | Secret Key do storage | - | ✅ |
-| `STORAGE_BUCKET_NAME` | Nome do bucket | - | ✅ |
-| `STORAGE_DESTINATION_FOLDER` | Pasta destino no bucket | `backups/` | ❌ |
-| `STORAGE_REGION` | Região AWS | - | ✅ (S3) / ❌ (R2) |
-
-### Agendamento e Geral
-
-| Variável | Descrição | Padrão | Obrigatória |
-|----------|-----------|--------|-------------|
-| `CRON_SCHEDULE` | Agendamento CRON | `0 */12 * * *` | ❌ |
-| `TIMEZONE` | Fuso horário para logs e backups | `America/Sao_Paulo` | ❌ |
-| `APP_ENV` | Ambiente da aplicação | `Development` | ❌ |
-
-### Email
-
-| Variável | Descrição | Padrão | Obrigatória |
-|----------|-----------|--------|-------------|
-| `EMAIL_FROM` | Remetente do email | - | ✅ |
-| `EMAIL_TO` | Destinatário do email | - | ✅ |
-| `EMAIL_SMTP` | Servidor SMTP | - | ✅ |
-| `EMAIL_PORT` | Porta SMTP | - | ✅ |
-| `EMAIL_USER` | Usuário SMTP | - | ✅ |
-| `EMAIL_PASSWORD` | Senha SMTP | - | ✅ |
-
-### Logging (SEQ — opcional)
-
-| Variável | Descrição | Padrão | Obrigatória |
-|----------|-----------|--------|-------------|
-| `SEQ_URL` | URL do servidor SEQ | - | ❌ |
-| `SEQ_API_KEY` | API Key do SEQ | - | ❌ |
-
-> **Nota:** Se `SEQ_URL` não estiver definido, apenas logging para console será utilizado.
-
-## 🕐 Configuração de Fuso Horário
-
-O sistema suporta configuração de fuso horário através da variável `TIMEZONE`. Por padrão, usa o horário de São Paulo.
-
-### Exemplos de timezones suportados:
-- `America/Sao_Paulo` - Horário de Brasília (padrão)
-- `America/New_York` - Horário de Nova York
-- `Europe/London` - Horário de Londres
-- `UTC` - Horário Universal Coordenado
-
-### Comportamento:
-- **Nomes dos backups**: Incluem timestamp no timezone configurado
-- **Organização de pastas**: Agrupadas por data local (YYYYMMDD)
-- **Emails de notificação**: Mostram horário local formatado
-- **Logs**: Registram eventos no horário local
-- **Metadados**: Incluem timezone para auditoria
-
-## 📦 Exemplo de Uso
-
-### PostgreSQL + Cloudflare R2
-
-```env
-DB_TYPE=postgres
-DB_HOST=db.exemplo.com
-DB_PORT=5432
-DB_USER=backup_user
-DB_PASSWORD=senha_segura
-DB_DATABASE=minha_base
-
-STORAGE_TYPE=r2
-STORAGE_ENDPOINT_URL=https://account-id.r2.cloudflarestorage.com
-STORAGE_ACCESS_KEY_ID=chave_acesso
-STORAGE_SECRET_ACCESS_KEY=chave_secreta
-STORAGE_BUCKET_NAME=meus-backups
-
-CRON_SCHEDULE=0 3 * * *
-```
-
-### MySQL + AWS S3
-
-```env
-DB_TYPE=mysql
-DB_HOST=mysql.exemplo.com
-DB_PORT=3306
-DB_USER=backup_user
-DB_PASSWORD=senha_segura
-DB_DATABASE=minha_base
-
-STORAGE_TYPE=s3
-STORAGE_REGION=us-east-1
-STORAGE_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-STORAGE_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-STORAGE_BUCKET_NAME=meus-backups
-
-CRON_SCHEDULE=0 */6 * * *
-```
-
-### SQL Server + Cloudflare R2
-
-```env
-DB_TYPE=mssql
-DB_HOST=sqlserver.exemplo.com
-DB_PORT=1433
-DB_USER=sa
-DB_PASSWORD=senha_segura
-DB_DATABASE=minha_base
-
-STORAGE_TYPE=r2
-STORAGE_ENDPOINT_URL=https://account-id.r2.cloudflarestorage.com
-STORAGE_ACCESS_KEY_ID=chave_acesso
-STORAGE_SECRET_ACCESS_KEY=chave_secreta
-STORAGE_BUCKET_NAME=meus-backups
-```
-
-## ⚠️ Migração da v2.x para v3.0
-
-A versão 3.0 introduz **breaking changes** nas variáveis de ambiente:
-
-| v2.x | v3.0 |
-|------|------|
-| `PG_HOST` | `DB_HOST` |
-| `PG_PORT` | `DB_PORT` |
-| `PG_USER` | `DB_USER` |
-| `PG_PASSWORD` | `DB_PASSWORD` |
-| `PG_DATABASE` | `DB_DATABASE` |
-| — | `DB_TYPE` (novo) |
-| `R2_ENDPOINT_URL` | `STORAGE_ENDPOINT_URL` |
-| `R2_ACCESS_KEY_ID` | `STORAGE_ACCESS_KEY_ID` |
-| `R2_SECRET_ACCESS_KEY` | `STORAGE_SECRET_ACCESS_KEY` |
-| `R2_BUCKET_NAME` | `STORAGE_BUCKET_NAME` |
-| `R2_DESTINATION_FOLDER` | `STORAGE_DESTINATION_FOLDER` |
-| — | `STORAGE_TYPE` (novo) |
-| — | `STORAGE_REGION` (novo, S3 apenas) |
-
-> As variáveis antigas (`PG_*`, `R2_*`) **não funcionam mais**. Atualize o seu `.env` conforme o `.env.example`.
-
-## 🤝 Contribuição
-
-1. Fork o projeto
-2. Crie uma branch (`git checkout -b feature/nova-funcionalidade`)
-3. Commit suas mudanças (`git commit -m 'feat: adiciona nova funcionalidade'`)
-4. Push para a branch (`git push origin feature/nova-funcionalidade`)
-5. Abra um Pull Request
-
-## 📝 Licença
-
-Este projeto está sob a licença MIT. Veja o arquivo `LICENSE` para mais detalhes.
+Em Linux, use `.venv/bin/python`. Builds oficiais suportam inicialmente apenas `linux/amd64`.

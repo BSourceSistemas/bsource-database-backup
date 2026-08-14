@@ -1,22 +1,22 @@
-"""
-BSource Database Backup Package
-Sistema automatizado de backup de bases de dados com suporte a múltiplos engines e storage providers.
-"""
+"""BSource Database Backup package."""
 
-__version__ = "3.0.0"
-__author__ = "BSource Team"
-__description__ = (
-    "Sistema automatizado de backup de bases de dados "
-    "(PostgreSQL, MySQL, MariaDB, SQL Server) "
-    "com envio para Cloudflare R2 ou AWS S3"
-)
+from .config import BackupConfig, load_config
+from .db_dumper import DatabaseDumper, create_dumper
+from .executor import BackupExecutor
+from .models import BackupResult, BackupRun, StageResult
+from .storage_provider import StorageProvider, create_storage
 
-from .db_dumper import DatabaseDumper, create_dumper_from_env
-from .storage_provider import StorageProvider, create_storage_from_env
+__version__ = "4.0.0"
 
 __all__ = [
+    "BackupConfig",
+    "BackupExecutor",
+    "BackupResult",
+    "BackupRun",
     "DatabaseDumper",
-    "create_dumper_from_env",
+    "StageResult",
     "StorageProvider",
-    "create_storage_from_env",
+    "create_dumper",
+    "create_storage",
+    "load_config",
 ]

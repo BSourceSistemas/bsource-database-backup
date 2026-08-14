@@ -1,253 +1,420 @@
-"""
-Módulo de abstração para dump de bases de dados.
-Suporta PostgreSQL, MySQL/MariaDB e SQL Server.
-"""
-import os
-import subprocess
-from abc import ABC, abstractmethod
-from typing import Optional
-import logging
+"""Database-specific dump, preflight, validation, and restore guidance."""
 
-log = logging.getLogger("backup.db")
+from __future__ import annotations
+
+import json
+import os
+import posixpath
+import re
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any
+
+from .command_runner import CommandRunner
+from .config import BackupConfig
+from .errors import BackupError
+
+
+def _write_secret_file(path: Path, content: str) -> Path:
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o600)
+    return path
 
 
 class DatabaseDumper(ABC):
-    """Classe abstrata para dump de bases de dados."""
+    database_type: str
+    extension: str
 
-    def __init__(
-        self,
-        host: str,
-        port: str,
-        user: str,
-        password: str,
-        database: str,
-        db_type: str,
-    ):
-        if not all([host, port, user, password, database]):
-            raise ValueError(
-                "Configurações de base de dados incompletas. "
-                "Verifique DB_HOST, DB_PORT, DB_USER, DB_PASSWORD e DB_DATABASE."
+    def __init__(self, config: BackupConfig, runner: CommandRunner):
+        self.config = config
+        self.runner = runner
+
+    def output_path(self, workdir: Path, run_id: str) -> Path:
+        return workdir / f"backup{self.extension}"
+
+    @abstractmethod
+    def check_client_version(self) -> str: ...
+
+    @abstractmethod
+    def check_connection(self, workdir: Path) -> str: ...
+
+    @abstractmethod
+    def create_dump(self, output_path: Path, workdir: Path, run_id: str) -> None: ...
+
+    @abstractmethod
+    def validate_dump(self, output_path: Path, workdir: Path, run_id: str) -> None: ...
+
+    @abstractmethod
+    def get_restore_instructions(self, object_path: str) -> str: ...
+
+    def _require_file(self, output_path: Path) -> None:
+        if not output_path.is_file():
+            raise BackupError("validation", "DumpMissing", "Database client did not create the expected dump file")
+        if output_path.stat().st_size <= 0:
+            raise BackupError("validation", "DumpEmpty", "Database client created an empty dump file")
+
+
+class PostgreSQLDumper(DatabaseDumper):
+    database_type = "postgresql"
+    extension = ".dump"
+
+    @property
+    def env(self) -> dict[str, str]:
+        return {"PGPASSWORD": self.config.password}
+
+    def check_client_version(self) -> str:
+        result = self.runner.run(["pg_dump", "--version"], stage="preflight", timeout=15)
+        match = re.search(r"(\d+)(?:\.\d+)?", result.stdout)
+        if not match or int(match.group(1)) != 17:
+            raise BackupError("preflight", "IncompatibleClient", "PostgreSQL client major 17 is required")
+        return match.group(0)
+
+    def check_connection(self, workdir: Path) -> str:
+        result = self.runner.run(
+            [
+                "psql",
+                "-X",
+                "-h",
+                self.config.host,
+                "-p",
+                str(self.config.port),
+                "-U",
+                self.config.username,
+                "-d",
+                self.config.database,
+                "-Atqc",
+                "SHOW server_version_num",
+            ],
+            stage="connection",
+            env=self.env,
+            timeout=30,
+        )
+        try:
+            major = int(result.stdout.strip()) // 10000
+        except ValueError as exc:
+            raise BackupError(
+                "connection", "UnknownServerVersion", "Could not determine PostgreSQL server version", cause=exc
+            ) from exc
+        if major not in {15, 16, 17}:
+            raise BackupError("preflight", "IncompatibleServer", f"PostgreSQL server major {major} is not supported")
+        return str(major)
+
+    def create_dump(self, output_path: Path, workdir: Path, run_id: str) -> None:
+        self.runner.run(
+            [
+                "pg_dump",
+                "-h",
+                self.config.host,
+                "-p",
+                str(self.config.port),
+                "-U",
+                self.config.username,
+                "-F",
+                "c",
+                "-b",
+                "-f",
+                str(output_path),
+                self.config.database,
+            ],
+            stage="dump",
+            env=self.env,
+            timeout=self.config.backup_timeout_seconds,
+        )
+
+    def validate_dump(self, output_path: Path, workdir: Path, run_id: str) -> None:
+        self._require_file(output_path)
+        self.runner.run(["pg_restore", "--list", str(output_path)], stage="validation", timeout=300)
+
+    def get_restore_instructions(self, object_path: str) -> str:
+        return f"pg_restore -h HOST -U USER -d TARGET_DB --clean --if-exists {object_path}"
+
+
+class _SQLTextDumper(DatabaseDumper):
+    extension = ".sql"
+    client_binary: str
+    dump_binary: str
+    expected_client_major: str
+    supported_servers: set[str]
+    expect_mariadb: bool
+
+    def _option_file(self, workdir: Path) -> Path:
+        password = json.dumps(self.config.password, ensure_ascii=False)
+        return _write_secret_file(workdir / "db-client.cnf", f"[client]\npassword={password}\n")
+
+    def check_client_version(self) -> str:
+        result = self.runner.run([self.dump_binary, "--version"], stage="preflight", timeout=15)
+        text = f"{result.stdout} {result.stderr}"
+        is_mariadb = "mariadb" in text.lower()
+        if is_mariadb != self.expect_mariadb or self.expected_client_major not in text:
+            raise BackupError("preflight", "IncompatibleClient", f"Unexpected {self.database_type} dump client version")
+        return text.strip()
+
+    def check_connection(self, workdir: Path) -> str:
+        option_file = self._option_file(workdir)
+        result = self.runner.run(
+            [
+                self.client_binary,
+                f"--defaults-file={option_file}",
+                "--host",
+                self.config.host,
+                "--port",
+                str(self.config.port),
+                "--user",
+                self.config.username,
+                "--batch",
+                "--skip-column-names",
+                "--execute",
+                "SELECT VERSION()",
+            ],
+            stage="connection",
+            timeout=30,
+        )
+        version = result.stdout.strip().splitlines()[-1]
+        is_mariadb = "mariadb" in version.lower()
+        if is_mariadb != self.expect_mariadb:
+            raise BackupError(
+                "preflight", "WrongServerEngine", f"Configured {self.database_type} does not match the connected server"
             )
+        normalized = version.lower().replace("-mariadb", "")
+        if not any(normalized.startswith(prefix) for prefix in self.supported_servers):
+            raise BackupError(
+                "preflight", "IncompatibleServer", f"Unsupported {self.database_type} server version: {version}"
+            )
+        return version
 
-        self.host = host
-        self.port = port
-        self.user = user
-        self.password = password
-        self.database = database
-        self.db_type = db_type
-
-    @abstractmethod
-    def dump(self, output_path: str) -> str:
-        """
-        Executa o dump da base de dados.
-
-        Args:
-            output_path: Caminho completo do arquivo de saída.
-
-        Returns:
-            str: Caminho do arquivo gerado.
-
-        Raises:
-            subprocess.CalledProcessError: Se o comando de dump falhar.
-        """
-
-    def get_metadata(self) -> dict:
-        """Retorna metadados sobre o backup para uso no upload."""
-        return {
-            "uploaded-by": "bsource-db-backup",
-            "database": self.database,
-            "backup-type": self.db_type,
-        }
-
-    @abstractmethod
-    def get_file_extension(self) -> str:
-        """Retorna a extensão do arquivo de backup (ex: '.sql', '.bak')."""
-
-
-class PostgresDumper(DatabaseDumper):
-    """Dump de bases de dados PostgreSQL via pg_dump."""
-
-    def __init__(self, host: str, port: str, user: str, password: str, database: str):
-        super().__init__(host, port, user, password, database, db_type="postgres")
-
-    def dump(self, output_path: str) -> str:
-        os.environ["PGPASSWORD"] = self.password
-
-        command = (
-            f"pg_dump -h {self.host} -p {self.port} -U {self.user} "
-            f"-F c -b -v -f {output_path} {self.database}"
+    def create_dump(self, output_path: Path, workdir: Path, run_id: str) -> None:
+        option_file = self._option_file(workdir)
+        self.runner.run(
+            [
+                self.dump_binary,
+                f"--defaults-file={option_file}",
+                "--host",
+                self.config.host,
+                "--port",
+                str(self.config.port),
+                "--user",
+                self.config.username,
+                "--single-transaction",
+                "--routines",
+                "--triggers",
+                "--events",
+                "--hex-blob",
+                f"--result-file={output_path}",
+                "--databases",
+                self.config.database,
+            ],
+            stage="dump",
+            timeout=self.config.backup_timeout_seconds,
         )
 
-        log.info(f"Executando: {command}")
-        subprocess.run(command, shell=True, check=True)
-        return output_path
+    def validate_dump(self, output_path: Path, workdir: Path, run_id: str) -> None:
+        self._require_file(output_path)
+        try:
+            with output_path.open("rb") as stream:
+                head = stream.read(8192)
+                stream.seek(max(0, output_path.stat().st_size - 8192))
+                tail = stream.read()
+        except OSError as exc:
+            raise BackupError("validation", "DumpUnreadable", "SQL dump cannot be read", cause=exc) from exc
+        if b"\x00" in head or b"--" not in head or b";" not in tail:
+            raise BackupError("validation", "InvalidSQLDump", "SQL dump failed structural validation")
 
-    def get_file_extension(self) -> str:
-        return ".sql"
+    def get_restore_instructions(self, object_path: str) -> str:
+        return f"{self.client_binary} --host HOST --user USER --password TARGET_DB < {object_path}"
 
 
-class MySQLDumper(DatabaseDumper):
-    """
-    Dump de bases de dados MySQL e MariaDB via mysqldump.
-    Compatível com ambos os engines — mysqldump é retrocompatível.
-    """
+class MySQLDumper(_SQLTextDumper):
+    database_type = "mysql"
+    client_binary = "mysql"
+    dump_binary = "mysqldump"
+    expected_client_major = "8.4"
+    supported_servers = {"8.0", "8.4"}
+    expect_mariadb = False
 
-    def __init__(
-        self,
-        host: str,
-        port: str,
-        user: str,
-        password: str,
-        database: str,
-        db_type: str = "mysql",
-    ):
-        super().__init__(host, port, user, password, database, db_type=db_type)
 
-    def dump(self, output_path: str) -> str:
-        command = (
-            f"mysqldump --host={self.host} --port={self.port} "
-            f"--user={self.user} --password={self.password} "
-            f"--single-transaction --routines --triggers "
-            f"--databases {self.database} "
-            f"--result-file={output_path}"
+class MariaDBDumper(_SQLTextDumper):
+    database_type = "mariadb"
+    client_binary = "mariadb"
+    dump_binary = "mariadb-dump"
+    expected_client_major = "11.4"
+    supported_servers = {"10.11", "11.4"}
+    expect_mariadb = True
+
+
+class MongoDBDumper(DatabaseDumper):
+    database_type = "mongodb"
+    extension = ".archive.gz"
+
+    def _config_file(self, workdir: Path) -> Path:
+        return _write_secret_file(workdir / "mongodump.yml", json.dumps({"password": self.config.password}))
+
+    def check_client_version(self) -> str:
+        result = self.runner.run(["mongodump", "--version"], stage="preflight", timeout=15)
+        if not re.search(r"100\.\d+\.\d+", result.stdout):
+            raise BackupError("preflight", "IncompatibleClient", "MongoDB Database Tools 100.x is required")
+        return result.stdout.strip()
+
+    def check_connection(self, workdir: Path) -> str:
+        try:
+            from pymongo import MongoClient
+
+            client: MongoClient[dict[str, Any]] = MongoClient(
+                self.config.host,
+                self.config.port,
+                username=self.config.username,
+                password=self.config.password,
+                authSource=self.config.auth_source,
+                serverSelectionTimeoutMS=30000,
+            )
+            info = client.admin.command("buildInfo")
+            client.admin.command("ping")
+            client.close()
+            version = str(info["version"])
+        except Exception as exc:
+            raise BackupError("connection", "DatabaseConnectionFailed", "MongoDB connection failed", cause=exc) from exc
+        if version.split(".", 1)[0] not in {"7", "8"}:
+            raise BackupError("preflight", "IncompatibleServer", f"MongoDB server version {version} is not supported")
+        return version
+
+    def create_dump(self, output_path: Path, workdir: Path, run_id: str) -> None:
+        secret_file = self._config_file(workdir)
+        self.runner.run(
+            [
+                "mongodump",
+                f"--config={secret_file}",
+                f"--host={self.config.host}",
+                f"--port={self.config.port}",
+                f"--username={self.config.username}",
+                f"--authenticationDatabase={self.config.auth_source}",
+                f"--db={self.config.database}",
+                f"--archive={output_path}",
+                "--gzip",
+            ],
+            stage="dump",
+            timeout=self.config.backup_timeout_seconds,
         )
 
-        log.info(f"Executando: mysqldump --host={self.host} --port={self.port} "
-                 f"--user={self.user} --password=****** "
-                 f"--single-transaction --routines --triggers "
-                 f"--databases {self.database} --result-file={output_path}")
-        subprocess.run(command, shell=True, check=True)
-        return output_path
-
-    def get_file_extension(self) -> str:
-        return ".sql"
-
-
-class MongoDumper(DatabaseDumper):
-    """Dump de bases de dados MongoDB via mongodump."""
-
-    def __init__(
-        self,
-        host: str,
-        port: str,
-        user: str,
-        password: str,
-        database: str,
-        auth_source: str = "admin",
-    ):
-        super().__init__(host, port, user, password, database, db_type="mongodb")
-        self.auth_source = auth_source
-
-    def dump(self, output_path: str) -> str:
-        command = (
-            f"mongodump --host={self.host} --port={self.port} "
-            f"--username={self.user} --password={self.password} "
-            f"--authenticationDatabase={self.auth_source} "
-            f"--db={self.database} "
-            f"--archive={output_path} --gzip"
+    def validate_dump(self, output_path: Path, workdir: Path, run_id: str) -> None:
+        self._require_file(output_path)
+        secret_file = self._config_file(workdir)
+        self.runner.run(
+            [
+                "mongorestore",
+                f"--config={secret_file}",
+                f"--host={self.config.host}",
+                f"--port={self.config.port}",
+                f"--username={self.config.username}",
+                f"--authenticationDatabase={self.config.auth_source}",
+                f"--archive={output_path}",
+                "--gzip",
+                "--dryRun",
+            ],
+            stage="validation",
+            timeout=300,
         )
 
-        log.info(
-            f"Executando: mongodump --host={self.host} --port={self.port} "
-            f"--username={self.user} --password=****** "
-            f"--authenticationDatabase={self.auth_source} "
-            f"--db={self.database} --archive={output_path} --gzip"
-        )
-        subprocess.run(command, shell=True, check=True)
-        return output_path
-
-    def get_file_extension(self) -> str:
-        return ".gz"
+    def get_restore_instructions(self, object_path: str) -> str:
+        return f"mongorestore --archive={object_path} --gzip --nsInclude='{self.config.database}.*'"
 
 
 class MSSQLDumper(DatabaseDumper):
-    """Dump de bases de dados SQL Server via sqlcmd."""
+    database_type = "mssql"
+    extension = ".bak"
 
-    def __init__(self, host: str, port: str, user: str, password: str, database: str):
-        super().__init__(host, port, user, password, database, db_type="mssql")
+    @property
+    def env(self) -> dict[str, str]:
+        return {"SQLCMDPASSWORD": self.config.password}
 
-    def dump(self, output_path: str) -> str:
-        backup_query = (
-            f"BACKUP DATABASE [{self.database}] "
-            f"TO DISK = N'{output_path}' "
-            f"WITH FORMAT, INIT, COMPRESSION, "
-            f"NAME = N'{self.database}-backup'"
+    def _base_args(self) -> list[str]:
+        return [
+            "sqlcmd",
+            "-S",
+            f"{self.config.host},{self.config.port}",
+            "-U",
+            self.config.username,
+            "-C",
+            "-b",
+            "-W",
+            "-h",
+            "-1",
+        ]
+
+    def output_path(self, workdir: Path, run_id: str) -> Path:
+        assert self.config.mssql_local_backup_dir is not None
+        return self.config.mssql_local_backup_dir / f"{run_id}.bak"
+
+    def _server_path(self, run_id: str) -> str:
+        assert self.config.mssql_server_backup_dir is not None
+        return posixpath.join(self.config.mssql_server_backup_dir.rstrip("/"), f"{run_id}.bak")
+
+    @staticmethod
+    def _identifier(value: str) -> str:
+        return "[" + value.replace("]", "]]") + "]"
+
+    @staticmethod
+    def _literal(value: str) -> str:
+        return "N'" + value.replace("'", "''") + "'"
+
+    def check_client_version(self) -> str:
+        result = self.runner.run(["sqlcmd", "-?"], stage="preflight", timeout=15)
+        text = f"{result.stdout} {result.stderr}"
+        if "18." not in text:
+            raise BackupError("preflight", "IncompatibleClient", "Microsoft sqlcmd/ODBC 18 is required")
+        return text.strip()
+
+    def check_connection(self, workdir: Path) -> str:
+        local_dir = self.config.mssql_local_backup_dir
+        if local_dir is None or not local_dir.is_dir() or not os.access(local_dir, os.R_OK | os.W_OK):
+            raise BackupError(
+                "preflight", "SharedVolumeUnavailable", "MSSQL shared volume is not readable and writable"
+            )
+        query = "SET NOCOUNT ON; SELECT CAST(SERVERPROPERTY('ProductMajorVersion') AS varchar(10));"
+        result = self.runner.run(self._base_args() + ["-Q", query], stage="connection", env=self.env, timeout=30)
+        version = result.stdout.strip().splitlines()[-1]
+        if version not in {"15", "16"}:
+            raise BackupError("preflight", "IncompatibleServer", f"SQL Server major {version} is not supported")
+        return version
+
+    def create_dump(self, output_path: Path, workdir: Path, run_id: str) -> None:
+        if output_path.exists():
+            raise BackupError("dump", "OutputCollision", "Unique SQL Server output file already exists")
+        query = (
+            f"BACKUP DATABASE {self._identifier(self.config.database)} "
+            f"TO DISK = {self._literal(self._server_path(run_id))} "
+            "WITH COPY_ONLY, INIT, CHECKSUM, COMPRESSION;"
         )
-
-        command = (
-            f'sqlcmd -S {self.host},{self.port} '
-            f'-U {self.user} -P {self.password} '
-            f'-Q "{backup_query}" -C'
+        self.runner.run(
+            self._base_args() + ["-Q", query],
+            stage="dump",
+            env=self.env,
+            timeout=self.config.backup_timeout_seconds,
         )
+        if not output_path.is_file():
+            raise BackupError(
+                "dump",
+                "SharedVolumeMismatch",
+                "SQL Server completed the backup but the BAK is not visible in MSSQL_LOCAL_BACKUP_DIR",
+            )
 
-        log.info(f"Executando: sqlcmd -S {self.host},{self.port} "
-                 f"-U {self.user} -P ****** -Q \"BACKUP DATABASE ...\" -C")
-        subprocess.run(command, shell=True, check=True)
-        return output_path
+    def validate_dump(self, output_path: Path, workdir: Path, run_id: str) -> None:
+        self._require_file(output_path)
+        query = f"RESTORE VERIFYONLY FROM DISK = {self._literal(self._server_path(run_id))} WITH CHECKSUM;"
+        self.runner.run(self._base_args() + ["-Q", query], stage="validation", env=self.env, timeout=600)
 
-    def get_file_extension(self) -> str:
-        return ".bak"
-
-
-# ── Factory ──────────────────────────────────────────────────────────────────
-
-_DUMPER_MAP = {
-    "postgres": PostgresDumper,
-    "mysql": MySQLDumper,
-    "mariadb": MySQLDumper,
-    "mssql": MSSQLDumper,
-    "mongodb": MongoDumper,
-}
-
-SUPPORTED_DB_TYPES = list(_DUMPER_MAP.keys())
+    def get_restore_instructions(self, object_path: str) -> str:
+        return f"RESTORE DATABASE [TARGET_DB] FROM DISK = N'{object_path}' WITH MOVE ..."
 
 
-def create_dumper_from_env() -> DatabaseDumper:
-    """
-    Cria um DatabaseDumper a partir das variáveis de ambiente.
+def create_dumper(config: BackupConfig, runner: CommandRunner) -> DatabaseDumper:
+    dumper_classes: dict[str, type[DatabaseDumper]] = {
+        "postgres": PostgreSQLDumper,
+        "mysql": MySQLDumper,
+        "mariadb": MariaDBDumper,
+        "mongodb": MongoDBDumper,
+        "mssql": MSSQLDumper,
+    }
+    dumper_class = dumper_classes[config.database_type]
+    return dumper_class(config, runner)
 
-    Variáveis utilizadas:
-        DB_TYPE: Tipo de base (postgres, mysql, mariadb, mssql)
-        DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_DATABASE
 
-    Returns:
-        DatabaseDumper: Instância configurada do dumper.
-
-    Raises:
-        ValueError: Se DB_TYPE não for suportado ou variáveis obrigatórias faltarem.
-    """
-    db_type = os.getenv("DB_TYPE", "").lower().strip()
-
-    if db_type not in _DUMPER_MAP:
-        raise ValueError(
-            f"DB_TYPE '{db_type}' não suportado. "
-            f"Valores aceitos: {', '.join(SUPPORTED_DB_TYPES)}"
-        )
-
-    host = os.getenv("DB_HOST")
-    port = os.getenv("DB_PORT")
-    user = os.getenv("DB_USER")
-    password = os.getenv("DB_PASSWORD")
-    database = os.getenv("DB_DATABASE")
-
-    dumper_class = _DUMPER_MAP[db_type]
-
-    # MySQLDumper aceita db_type para diferenciar mysql de mariadb nos metadados
-    if db_type in ("mysql", "mariadb"):
-        return dumper_class(
-            host=host, port=port, user=user,
-            password=password, database=database, db_type=db_type,
-        )
-
-    # MongoDumper aceita auth_source para configurar a base de autenticação
-    if db_type == "mongodb":
-        auth_source = os.getenv("DB_AUTH_SOURCE", "admin")
-        return dumper_class(
-            host=host, port=port, user=user,
-            password=password, database=database, auth_source=auth_source,
-        )
-
-    return dumper_class(
-        host=host, port=port, user=user,
-        password=password, database=database,
-    )
+SUPPORTED_DB_TYPES = ["postgres", "mysql", "mariadb", "mongodb", "mssql"]
