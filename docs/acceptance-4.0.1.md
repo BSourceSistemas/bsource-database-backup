@@ -2,7 +2,8 @@
 
 A publicação e os testes locais não comprovam recebimento pelo relay de produção
 nem restauração de um objeto do R2 real. Estes dois aceites são executados pelo
-operador na VPS e registrados separadamente.
+operador na VPS e registrados separadamente. Execute os comandos a partir
+de um checkout da tag `v4.0.1`, para disponibilizar os roteiros em `scripts/`.
 
 ## Imagem e configuração
 

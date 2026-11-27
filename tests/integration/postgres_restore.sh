@@ -4,6 +4,9 @@ set -euo pipefail
 postgres_image="${1:?postgres image tag is required}"
 target_image="${2:-postgres:17.10-bookworm}"
 app_image="${BACKUP_TEST_IMAGE:-bsource-database-backup:test}"
+minio_image="bsource-minio:integration"
+docker build --build-arg BACKUP_IMAGE="$app_image" -f tests/integration/Dockerfile.minio \
+  -t "$minio_image" tests/integration
 suffix="${GITHUB_RUN_ID:-local}-${RANDOM}"
 network="bsource-it-${suffix}"
 source_container="bsource-pg-source-${suffix}"
@@ -12,7 +15,7 @@ minio_container="bsource-minio-${suffix}"
 artifact_volume="bsource-artifact-${suffix}"
 
 cleanup() {
-  docker rm -f "$source_container" "$target_container" "$minio_container" >/dev/null 2>&1 || true
+  docker rm -fv "$source_container" "$target_container" "$minio_container" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   docker volume rm "$artifact_volume" >/dev/null 2>&1 || true
 }
@@ -22,7 +25,7 @@ docker network create "$network" >/dev/null
 docker volume create "$artifact_volume" >/dev/null
 docker run -d --name "$minio_container" --network "$network" --network-alias minio \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  minio/minio:RELEASE.2025-04-22T22-12-26Z server /data >/dev/null
+  "$minio_image" server /data >/dev/null
 docker run -d --name "$source_container" --network "$network" --network-alias pg-source \
   -e POSTGRES_PASSWORD=test-password -e POSTGRES_DB=source_db "$postgres_image" >/dev/null
 docker run -d --name "$target_container" --network "$network" --network-alias pg-target \
@@ -30,12 +33,12 @@ docker run -d --name "$target_container" --network "$network" --network-alias pg
 
 for container in "$source_container" "$target_container"; do
   for _ in $(seq 1 60); do
-    docker exec "$container" pg_isready -U postgres >/dev/null 2>&1 && break
+    docker exec "$container" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break
     sleep 1
   done
 done
 for _ in $(seq 1 60); do
-  docker run --rm --network "$network" --entrypoint /bin/sh minio/mc:RELEASE.2025-04-16T18-13-26Z \
+  docker run --rm --network "$network" --entrypoint /bin/sh "$minio_image" \
     -c "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null && mc ready local" \
     >/dev/null 2>&1 && break
   sleep 1
@@ -43,7 +46,7 @@ done
 
 docker exec -e PGPASSWORD=test-password "$source_container" psql -U postgres -d source_db -v ON_ERROR_STOP=1 \
   -c "CREATE TABLE restore_probe(id integer PRIMARY KEY, value text); INSERT INTO restore_probe VALUES (1,'alpha'),(2,'beta'),(3,'gamma');" >/dev/null
-docker run --rm --network "$network" --entrypoint /bin/sh minio/mc:RELEASE.2025-04-16T18-13-26Z \
+docker run --rm --network "$network" --entrypoint /bin/sh "$minio_image" \
   -c "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null && mc mb local/backups" >/dev/null
 
 docker run --rm --network "$network" \
@@ -56,7 +59,7 @@ docker run --rm --network "$network" \
   "$app_image" run
 
 docker run --rm --network "$network" -v "${artifact_volume}:/out" \
-  --entrypoint /bin/sh minio/mc:RELEASE.2025-04-16T18-13-26Z -c \
+  --entrypoint /bin/sh "$minio_image" -c \
   "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null && mc find local/backups --name '*.dump' --exec 'mc cp {} /out/backup.dump'"
 
 docker run --rm --network "$network" -v "${artifact_volume}:/restore:ro" \
