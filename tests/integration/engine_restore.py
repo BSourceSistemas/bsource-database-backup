@@ -45,10 +45,29 @@ class Environment:
         self.target = f"bsource-{engine}-target-{suffix}"
         self.storage = f"bsource-{engine}-storage-{suffix}"
         self.shared = f"bsource-{engine}-shared-{suffix}"
+        self.tls = f"bsource-{engine}-tls-{suffix}"
 
     def create(self) -> None:
         docker("network", "create", self.network)
         docker("volume", "create", self.storage)
+        if self.engine == "mariadb":
+            docker("volume", "create", self.tls)
+            docker(
+                "run",
+                "--rm",
+                "--user",
+                "0",
+                "-v",
+                f"{self.tls}:/tls",
+                "--entrypoint",
+                "sh",
+                APP_IMAGE,
+                "-c",
+                "openssl req -x509 -newkey rsa:2048 -nodes -days 1 "
+                "-keyout /tls/key.pem -out /tls/cert.pem -subj /CN=db-source "
+                "-addext 'subjectAltName=DNS:db-source,DNS:db-target,DNS:localhost' "
+                "&& chmod 0644 /tls/key.pem",
+            )
         if self.engine == "mssql":
             docker("volume", "create", self.shared)
             docker(
@@ -69,6 +88,8 @@ class Environment:
         docker("volume", "rm", self.storage, allow_failure=True)
         if self.engine == "mssql":
             docker("volume", "rm", self.shared, allow_failure=True)
+        if self.engine == "mariadb":
+            docker("volume", "rm", self.tls, allow_failure=True)
 
 
 def backup_args(env: Environment, engine: str, host: str, port: int, database: str) -> list[str]:
@@ -106,6 +127,8 @@ def backup_args(env: Environment, engine: str, host: str, port: int, database: s
         "-e",
         "STORAGE_DESTINATION_FOLDER=integration",
     ]
+    if engine == "mariadb":
+        args.extend(["-v", f"{env.tls}:/tls:ro", "-e", "SSL_CERT_FILE=/tls/cert.pem"])
     if engine == "mssql":
         args.extend(
             [
@@ -159,6 +182,12 @@ def mysql_restore(engine: str, image: str) -> None:
             "-e",
             f"{engine.upper()}_DATABASE=source_db",
         ]
+        tls_mount = ["-v", f"{env.tls}:/tls:ro"] if engine == "mariadb" else []
+        tls_options = (
+            ["--ssl-ca=/tls/cert.pem", "--ssl-cert=/tls/cert.pem", "--ssl-key=/tls/key.pem"]
+            if engine == "mariadb"
+            else []
+        )
         # MariaDB uses MARIADB_*; MySQL uses MYSQL_*.
         docker(
             "run",
@@ -170,7 +199,9 @@ def mysql_restore(engine: str, image: str) -> None:
             "--network-alias",
             "db-source",
             *common,
+            *tls_mount,
             image,
+            *tls_options,
         )
         docker(
             "run",
@@ -183,7 +214,9 @@ def mysql_restore(engine: str, image: str) -> None:
             "db-target",
             "-e",
             f"{engine.upper()}_ROOT_PASSWORD={SECRET}",
+            *tls_mount,
             image,
+            *tls_options,
         )
         wait_for(env.source, client, "-uroot", f"-p{SECRET}", "-e", "SELECT 1")
         wait_for(env.target, client, "-uroot", f"-p{SECRET}", "-e", "SELECT 1")
@@ -209,6 +242,8 @@ def mysql_restore(engine: str, image: str) -> None:
             f"{env.storage}:/storage:ro",
             "-e",
             f"MYSQL_PWD={SECRET}",
+            *tls_mount,
+            *(["-e", "SSL_CERT_FILE=/tls/cert.pem"] if engine == "mariadb" else []),
             "--entrypoint",
             client,
             APP_IMAGE,

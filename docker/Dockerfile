@@ -14,7 +14,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
 
 RUN test "$(dpkg --print-architecture)" = "amd64" && \
-    apt-get update && apt-get install -y --no-install-recommends \
+    apt-get update && apt-get upgrade -y --no-install-recommends && \
+    apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg xz-utils libaio1 libnuma1 libtinfo6 && \
     install -d -m 0755 /etc/apt/keyrings && \
     curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg && \
