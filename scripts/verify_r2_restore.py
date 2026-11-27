@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restore one exact R2 backup into disposable PostgreSQL 17 containers.
+"""Restore one exact R2 backup into disposable PostgreSQL 16 containers.
 
 Requires Docker, a backup run JSON result, and application-specific SQL/expected
 output files. No R2 object is deleted and no source database is contacted.
@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument("--result", type=Path, required=True, help="Final JSON object from backup run")
     parser.add_argument("--verify-sql", type=Path, required=True, help="Deterministic application validation queries")
     parser.add_argument("--expected-results", type=Path, required=True, help="Expected psql -At output")
-    parser.add_argument("--postgres-image", default="postgres:17.10-bookworm")
+    parser.add_argument("--postgres-image", default="postgres:16.14-bookworm")
     args = parser.parse_args()
     if "@sha256:" not in args.image:
         parser.error("--image must use an immutable registry digest")
@@ -139,8 +139,8 @@ except Exception:
                     "SHOW server_version_num",
                 )
             )
-            if not 170000 <= version < 180000:
-                raise RuntimeError("The isolated restore target must be PostgreSQL 17")
+            if not 160000 <= version < 170000:
+                raise RuntimeError("The isolated restore target must be PostgreSQL 16")
             # Only the disposable database password is mounted for restore.
             docker(
                 "run",

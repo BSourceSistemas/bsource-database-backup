@@ -6,7 +6,7 @@ from .executor import BackupExecutor
 from .models import BackupResult, BackupRun, StageResult
 from .storage_provider import StorageProvider, create_storage
 
-__version__ = "4.0.1"
+__version__ = "4.0.2"
 
 __all__ = [
     "BackupConfig",

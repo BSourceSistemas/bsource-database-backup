@@ -122,9 +122,12 @@ python3 scripts/verify_r2_restore.py \
 ```
 
 Substitua as consultas/expectativas pelo esquema e dados do banco escolhido.
-Se necessário, acrescente `--secrets-dir /caminho/secrets`. A origem deve ser
-PostgreSQL 17; o destino padrão é `postgres:17.10-bookworm`, substituível por
-outra imagem PostgreSQL 17 compatível via `--postgres-image`.
+Se necessário, acrescente `--secrets-dir /caminho/secrets`. A origem informada
+para este aceite é PostgreSQL 16, suportada pela imagem 4.0.1. Essa imagem usa
+`pg_dump` 17; o destino deste roteiro continua sendo PostgreSQL 17, com padrão
+`postgres:17.10-bookworm`, substituível por outra imagem PostgreSQL 17 compatível
+via `--postgres-image`. Isso não comprova restauração em PostgreSQL 16:
+`transaction_timeout`, emitido pelo cliente 17, não existe no servidor 16.
 
 O roteiro verifica metadata, baixa apenas o objeto indicado, recalcula tamanho
 e SHA-256 e restaura usando `pg_restore --exit-on-error --no-owner --no-acl`.

@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $false)]
-    [string]$PostgresImage = "postgres:17.10-bookworm"
+    [string]$PostgresImage = "postgres:16.14-bookworm"
 )
 
 $ErrorActionPreference = "Stop"

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 postgres_image="${1:?postgres image tag is required}"
-target_image="${2:-postgres:17.10-bookworm}"
+target_image="${2:-postgres:16.14-bookworm}"
 app_image="${BACKUP_TEST_IMAGE:-bsource-database-backup:test}"
 minio_image="bsource-minio:integration"
 docker build --build-arg BACKUP_IMAGE="$app_image" -f tests/integration/Dockerfile.minio \
@@ -64,8 +64,14 @@ docker run --rm --network "$network" -v "${artifact_volume}:/out" \
 
 docker run --rm --network "$network" -v "${artifact_volume}:/restore:ro" \
   -e PGPASSWORD=test-password --entrypoint pg_restore "$app_image" \
-  -h pg-target -p 5432 -U postgres -d target_db --clean --if-exists /restore/backup.dump
+  -h pg-target -p 5432 -U postgres -d target_db --exit-on-error --clean --if-exists /restore/backup.dump
 
 restored_count="$(docker exec -e PGPASSWORD=test-password "$target_container" \
   psql -U postgres -d target_db -Atqc "SELECT count(*) FROM restore_probe")"
 test "$restored_count" = "3"
+restored_rows="$(docker exec -e PGPASSWORD=test-password "$target_container" \
+  psql -X -U postgres -d target_db -Atqc "SELECT id || ':' || value FROM restore_probe ORDER BY id")"
+test "$restored_rows" = $'1:alpha\n2:beta\n3:gamma'
+restored_schema="$(docker exec -e PGPASSWORD=test-password "$target_container" \
+  psql -X -U postgres -d target_db -Atqc "SELECT column_name || ':' || data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='restore_probe' ORDER BY ordinal_position")"
+test "$restored_schema" = $'id:integer\nvalue:text'

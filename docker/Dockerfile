@@ -6,7 +6,7 @@ ARG MONGODB_TOOLS_VERSION=100.17.0
 
 LABEL org.opencontainers.image.title="BSource Database Backup" \
       org.opencontainers.image.description="Secure single-database backup service" \
-      org.opencontainers.image.version="4.0.1"
+      org.opencontainers.image.version="4.0.2"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/mysql84/bin:/opt/mssql-tools18/bin:${PATH}" \
@@ -27,7 +27,7 @@ RUN test "$(dpkg --print-architecture)" = "amd64" && \
     curl --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | gpg --dearmor -o /etc/apt/keyrings/mongodb.gpg && \
     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/mongodb.gpg] https://repo.mongodb.org/apt/debian bookworm/mongodb-org/8.0 main" > /etc/apt/sources.list.d/mongodb.list && \
     apt-get update && ACCEPT_EULA=Y apt-get install -y --no-install-recommends \
-      postgresql-client-17=17.11-1.pgdg12+2 \
+      postgresql-client-16=16.16-1.pgdg12+1 \
       mariadb-client=1:11.4.9+maria~deb12 \
       mssql-tools18=18.6.2.1-1 unixodbc=2.3.11-2+deb12u1 \
       mongodb-database-tools=${MONGODB_TOOLS_VERSION} && \
@@ -43,7 +43,8 @@ RUN curl --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 -fsSL 
     mkdir -p /opt/mysql84 && \
     tar -xJf /tmp/mysql.tar.xz --strip-components=1 -C /opt/mysql84 && \
     rm -f /tmp/mysql.tar.xz /tmp/mysql.tar.xz.asc && \
-    pg_dump --version | grep -E ' 17\.' && \
+    pg_dump --version | grep -E ' 16\.' && \
+    pg_restore --version | grep -E ' 16\.' && \
     /opt/mysql84/bin/mysqldump --version | grep -F '8.4.' && \
     mariadb-dump --version | grep -F '11.4.' && \
     mongodump --version | grep -F "${MONGODB_TOOLS_VERSION}" && \

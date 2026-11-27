@@ -65,8 +65,8 @@ class PostgreSQLDumper(DatabaseDumper):
     def check_client_version(self) -> str:
         result = self.runner.run(["pg_dump", "--version"], stage="preflight", timeout=15)
         match = re.search(r"(\d+)(?:\.\d+)?", result.stdout)
-        if not match or int(match.group(1)) != 17:
-            raise BackupError("preflight", "IncompatibleClient", "PostgreSQL client major 17 is required")
+        if not match or int(match.group(1)) != 16:
+            raise BackupError("preflight", "IncompatibleClient", "PostgreSQL client major 16 is required")
         return match.group(0)
 
     def check_connection(self, workdir: Path) -> str:
@@ -95,7 +95,7 @@ class PostgreSQLDumper(DatabaseDumper):
             raise BackupError(
                 "connection", "UnknownServerVersion", "Could not determine PostgreSQL server version", cause=exc
             ) from exc
-        if major not in {15, 16, 17}:
+        if major not in {15, 16}:
             raise BackupError("preflight", "IncompatibleServer", f"PostgreSQL server major {major} is not supported")
         return str(major)
 

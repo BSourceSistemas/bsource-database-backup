@@ -6,16 +6,21 @@ Serviço de backup em que cada contêiner protege exatamente um banco, com execu
 
 | `DB_TYPE` | Versões de servidor | Formato | Validação antes do upload |
 |---|---|---|---|
-| `postgres` | 15–17 | custom `.dump` | `pg_restore --list` |
+| `postgres` | 15–16 | custom `.dump` | `pg_restore --list` |
 | `mysql` | 8.0/8.4 | `.sql` | validação estrutural |
 | `mariadb` | 10.11/11.4 | `.sql` | validação estrutural |
 | `mongodb` | 7/8 | `.archive.gz` | `mongorestore --dryRun` |
 | `mssql` | 2019/2022 | `.bak` | volume compartilhado e `RESTORE VERIFYONLY` |
 
-A imagem usa clientes PostgreSQL 17. Dumps das origens PostgreSQL 15–17 são
-validados por restauração em PostgreSQL 17; restauração em versões anteriores
-ao cliente de dump não é garantida (por exemplo, `transaction_timeout` não existe
-no PostgreSQL 15/16).
+A partir da versão 4.0.2, a imagem usa `pg_dump` e `pg_restore` 16. Dumps das
+origens PostgreSQL 15–16 são validados por restauração em PostgreSQL 16.
+Servidores PostgreSQL 17 ou superiores são rejeitados no preflight, pois exigem
+um cliente de dump compatível. Restauração em versões anteriores ao cliente de
+dump não é garantida.
+
+A versão 4.0.1 permanece imutável e usa clientes 17. Para o aceite em PostgreSQL
+16, gere um novo backup com 4.0.2; dumps antigos feitos com o cliente 17 não são
+convertidos por esta atualização.
 
 MySQL e MariaDB usam clientes distintos. SQL Server remoto sem filesystem compartilhado não é suportado.
 
@@ -161,5 +166,5 @@ Falha exclusiva de notificação mantém o objeto, o sucesso e o código `0` do
 backup, sem degradar sua saúde. O cooldown começa apenas após envio bem-sucedido.
 Estados de versões anteriores continuam legíveis.
 
-Consulte o [roteiro de aceite 4.0.1](docs/acceptance-4.0.1.md) para testar o relay
-na VPS e restaurar um objeto R2 específico em PostgreSQL 17 isolado.
+Consulte o [roteiro de aceite 4.0.2](docs/acceptance-4.0.2.md) para testar o relay
+na VPS e restaurar um objeto R2 específico em PostgreSQL 16 isolado.
