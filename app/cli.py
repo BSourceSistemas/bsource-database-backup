@@ -99,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
                     "fileSizeBytes": result.file_size_bytes,
                     "durationMs": result.duration_ms,
                     "error": result.error,
+                    "notificationStatus": result.notification_status.value,
+                    "notificationErrorType": result.notification_error_type,
                 },
                 ensure_ascii=False,
             )

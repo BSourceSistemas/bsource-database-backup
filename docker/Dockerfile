@@ -6,7 +6,7 @@ ARG MONGODB_TOOLS_VERSION=100.17.0
 
 LABEL org.opencontainers.image.title="BSource Database Backup" \
       org.opencontainers.image.description="Secure single-database backup service" \
-      org.opencontainers.image.version="4.0.0"
+      org.opencontainers.image.version="4.0.1"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/mysql84/bin:/opt/mssql-tools18/bin:${PATH}" \

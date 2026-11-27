@@ -137,3 +137,75 @@ def test_database_name_is_encoded_in_object_key(config_factory):
     result = executor(config, FakeDumper(config), FakeStorage()).run()
     assert result.success
     assert "Case%2FSensitive%20Database" in result.object_key
+
+
+def test_failed_notification_preserves_backup_and_logs_no_secrets(config_factory, caplog):
+    import logging
+    import smtplib
+
+    from app.observability import BACKUP_NOTIFICATIONS, JsonFormatter
+
+    config = config_factory(notify_on_success=True)
+    storage = FakeStorage()
+
+    class SensitiveFailure(Notifier):
+        def send(self, event, payload):
+            raise smtplib.SMTPAuthenticationError(535, f"{config.password} private@example.test".encode())
+
+    counter = BACKUP_NOTIFICATIONS.labels("noop", "failed")
+    before = counter._value.get()
+    runner = executor(config, FakeDumper(config), storage, SensitiveFailure())
+    with caplog.at_level(logging.INFO):
+        result = runner.run()
+    state = runner.state.snapshot()
+    assert result.success
+    assert result.error is None
+    assert result.notification_status == NotificationStatus.FAILED
+    assert result.notification_error_type == "NotificationAuthenticationFailed"
+    assert storage.objects[result.object_key][0] == b"backup-data"
+    assert state["latestRun"]["status"] == "success"
+    assert state["latestRun"]["notification_error_type"] == result.notification_error_type
+    assert state["lastSuccess"]
+    assert state["consecutiveFailures"] == 0
+    assert state["lastFailure"] is None
+    assert state["lastNotificationAt"] is None
+    assert counter._value.get() == before + 1
+    failure = next(record for record in caplog.records if record.message == "NotificationFailed")
+    assert failure.levelno == logging.ERROR
+    assert failure.BackupRunId == result.run_id
+    output = "".join(JsonFormatter().format(record) for record in caplog.records)
+    assert config.password not in output
+    assert "private@example.test" not in output
+    assert config.password not in str(state)
+    # A failed send does not activate the cooldown.
+    runner.run()
+    assert counter._value.get() == before + 2
+
+
+def test_simultaneous_failure_preserves_backup_error(config_factory):
+    config = config_factory()
+    result = executor(config, FakeDumper(config, "validation"), FakeStorage(), RecordingNotifier(fail=True)).run()
+    assert not result.success
+    assert result.error["stage"] == "validation"
+    assert result.error["errorType"] == "InvalidDump"
+    assert result.notification_status == NotificationStatus.FAILED
+    assert result.notification_error_type == "NotificationFailed"
+
+
+def test_notification_metrics_count_logical_send_and_cooldown(config_factory, monkeypatch):
+    from app.notifier import RetryingNotifier
+    from app.observability import BACKUP_NOTIFICATIONS
+
+    config = config_factory(notify_on_success=True)
+    delegate = RecordingNotifier(fail=True)
+    monkeypatch.setattr("app.notifier.time.sleep", lambda _: None)
+    counter = BACKUP_NOTIFICATIONS.labels("noop", "failed")
+    before = counter._value.get()
+    runner = executor(config, FakeDumper(config), FakeStorage(), RetryingNotifier(delegate))
+    runner.run()
+    assert len(delegate.events) == 3
+    assert counter._value.get() == before + 1
+    delegate.fail = False
+    assert runner.run().notification_status == NotificationStatus.SENT
+    assert runner.run().notification_status == NotificationStatus.SUPPRESSED
+    assert len(delegate.events) == 4

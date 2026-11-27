@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
 import uuid
 
 SECRET = "Test-Password_2026!"
-APP_IMAGE = "bsource-database-backup:test"
+APP_IMAGE = os.environ.get("BACKUP_TEST_IMAGE", "bsource-database-backup:test")
 
 
 def docker(*args: str, capture: bool = False, allow_failure: bool = False) -> str:
@@ -160,8 +161,16 @@ def mysql_restore(engine: str, image: str) -> None:
         ]
         # MariaDB uses MARIADB_*; MySQL uses MYSQL_*.
         docker(
-            "run", "-d", "--name", env.source, "--network", env.network,
-            "--network-alias", "db-source", *common, image,
+            "run",
+            "-d",
+            "--name",
+            env.source,
+            "--network",
+            env.network,
+            "--network-alias",
+            "db-source",
+            *common,
+            image,
         )
         docker(
             "run",
@@ -235,12 +244,28 @@ def mongo_restore(image: str) -> None:
     try:
         base = ["-e", "MONGO_INITDB_ROOT_USERNAME=root", "-e", f"MONGO_INITDB_ROOT_PASSWORD={SECRET}"]
         docker(
-            "run", "-d", "--name", env.source, "--network", env.network,
-            "--network-alias", "db-source", *base, image,
+            "run",
+            "-d",
+            "--name",
+            env.source,
+            "--network",
+            env.network,
+            "--network-alias",
+            "db-source",
+            *base,
+            image,
         )
         docker(
-            "run", "-d", "--name", env.target, "--network", env.network,
-            "--network-alias", "db-target", *base, image,
+            "run",
+            "-d",
+            "--name",
+            env.target,
+            "--network",
+            env.network,
+            "--network-alias",
+            "db-target",
+            *base,
+            image,
         )
         ping = [
             "mongosh",

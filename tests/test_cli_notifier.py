@@ -126,7 +126,7 @@ def test_email_notifier_supports_multiple_recipients(config_factory, monkeypatch
         def __exit__(self, *args):
             return None
 
-        def starttls(self):
+        def starttls(self, *, context):
             return None
 
         def login(self, user, password):
@@ -169,3 +169,29 @@ def test_notifier_factory_and_json_logging(config_factory):
     record = logging.LogRecord("test", logging.INFO, __file__, 1, "hello", (), None)
     record.BackupRunId = "id"  # type: ignore[attr-defined]
     assert json.loads(JsonFormatter().format(record))["BackupRunId"] == "id"
+
+
+def test_cli_reports_notification_failure_with_success_exit(config_factory, monkeypatch, capsys):
+    from app.models import NotificationStatus
+
+    monkeypatch.setattr(cli, "load_config", lambda: config_factory())
+
+    class Executor:
+        def __init__(self, _config):
+            pass
+
+        def run(self):
+            return BackupResult(
+                True,
+                "run-id",
+                notification_status=NotificationStatus.FAILED,
+                notification_error_type="NotificationTLSFailed",
+            )
+
+    monkeypatch.setattr(cli, "BackupExecutor", Executor)
+    assert cli.main(["run"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["success"] is True
+    assert output["error"] is None
+    assert output["notificationStatus"] == "failed"
+    assert output["notificationErrorType"] == "NotificationTLSFailed"

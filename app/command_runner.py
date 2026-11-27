@@ -125,7 +125,7 @@ class CommandRunner:
             except subprocess.TimeoutExpired:
                 process.kill()
             return
-        kill_group = os.killpg  # type: ignore[attr-defined]
+        kill_group = os.killpg
         try:
             kill_group(process.pid, signal.SIGTERM)
             process.wait(timeout=5)

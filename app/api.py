@@ -17,6 +17,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .config import BackupConfig
 from .executor import BackupExecutor
+from .models import NotificationStatus
 from .observability import SCHEDULER_MISFIRES
 
 
@@ -95,6 +96,7 @@ def create_api(config: BackupConfig, executor: BackupExecutor) -> FastAPI:
     @app.get("/status")
     def status() -> dict[str, Any]:
         state = executor.state.snapshot()
+        latest = state.get("latestRun") or {}
         now = datetime.now(UTC)
         last_success = _parse_timestamp(state.get("lastSuccess"))
         current = state.get("currentRun") if isinstance(state.get("currentRun"), dict) else None
@@ -117,6 +119,8 @@ def create_api(config: BackupConfig, executor: BackupExecutor) -> FastAPI:
             "nextRun": state.get("nextRun"),
             "consecutiveFailures": int(state.get("consecutiveFailures", 0)),
             "running": current is not None,
+            "notificationStatus": latest.get("notification_status", NotificationStatus.NOT_REQUESTED.value),
+            "notificationErrorType": latest.get("notification_error_type"),
         }
 
     @app.get("/metrics")

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 postgres_image="${1:?postgres image tag is required}"
+target_image="${2:-postgres:17.10-bookworm}"
+app_image="${BACKUP_TEST_IMAGE:-bsource-database-backup:test}"
 suffix="${GITHUB_RUN_ID:-local}-${RANDOM}"
 network="bsource-it-${suffix}"
 source_container="bsource-pg-source-${suffix}"
@@ -24,7 +26,7 @@ docker run -d --name "$minio_container" --network "$network" --network-alias min
 docker run -d --name "$source_container" --network "$network" --network-alias pg-source \
   -e POSTGRES_PASSWORD=test-password -e POSTGRES_DB=source_db "$postgres_image" >/dev/null
 docker run -d --name "$target_container" --network "$network" --network-alias pg-target \
-  -e POSTGRES_PASSWORD=test-password -e POSTGRES_DB=target_db "$postgres_image" >/dev/null
+  -e POSTGRES_PASSWORD=test-password -e POSTGRES_DB=target_db "$target_image" >/dev/null
 
 for container in "$source_container" "$target_container"; do
   for _ in $(seq 1 60); do
@@ -51,14 +53,14 @@ docker run --rm --network "$network" \
   -e STORAGE_TYPE=s3 -e STORAGE_ENDPOINT_URL=http://minio:9000 -e STORAGE_REGION=us-east-1 \
   -e STORAGE_ACCESS_KEY_ID=minioadmin -e STORAGE_SECRET_ACCESS_KEY=minioadmin \
   -e STORAGE_BUCKET_NAME=backups -e STORAGE_DESTINATION_FOLDER=integration \
-  bsource-database-backup:test run
+  "$app_image" run
 
 docker run --rm --network "$network" -v "${artifact_volume}:/out" \
   --entrypoint /bin/sh minio/mc:RELEASE.2025-04-16T18-13-26Z -c \
   "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null && mc find local/backups --name '*.dump' --exec 'mc cp {} /out/backup.dump'"
 
 docker run --rm --network "$network" -v "${artifact_volume}:/restore:ro" \
-  -e PGPASSWORD=test-password --entrypoint pg_restore bsource-database-backup:test \
+  -e PGPASSWORD=test-password --entrypoint pg_restore "$app_image" \
   -h pg-target -p 5432 -U postgres -d target_db --clean --if-exists /restore/backup.dump
 
 restored_count="$(docker exec -e PGPASSWORD=test-password "$target_container" \

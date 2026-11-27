@@ -4,7 +4,8 @@
 
 - Uma instância contém uma configuração e protege um banco.
 - O dump só é bem-sucedido depois da validação e da confirmação do objeto.
-- Notificação e backup possuem resultados independentes.
+- Notificação e backup possuem resultados independentes. O executor persiste status/categoria da notificação, expõe o resultado na CLI/API e conta um resultado Prometheus após as tentativas.
+- SMTP usa STARTTLS verificado, timeout de 30 segundos e autenticação opcional explícita (`EMAIL_AUTH_MODE=credentials|none`). Falhas propagam pelo notificador até o executor sem substituir o erro ou sucesso do backup.
 - Nenhum cliente é executado por shell e nenhuma senha entra em `argv`.
 - Arquivos intermediários são privados, exclusivos por execução e sempre limpos.
 
