@@ -1,17 +1,21 @@
-version: '3.8'
-
 services:
   bsource-db-backup:
     container_name: bsource-db-backup
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      platforms:
+        - linux/amd64
     env_file:
-      - .env
+      - path: .env
+        required: false
     volumes:
-      # Volume para backups temporários (opcional)
-      - ./app/backups:/tmp
+      - backup-state:/var/lib/bsource-backup
     restart: unless-stopped
-    # Descomente para usar imagem pré-construída
-    # image: bsourcedev/bsource-db-backup:latest
+    # Produção: prefira sha-* ou digest imutável.
+    # image: bsourcedev/bsource-database-backup:sha-xxxxxxx
+    ports:
+      - "127.0.0.1:8080:8080"
     
     # Configurações de recursos (opcional)
     deploy:
@@ -21,11 +25,5 @@ services:
         reservations:
           memory: 256M
           
-    # networks:
-    #   - bsource-network
-
-# networks:
-#   bsource-network:
-#     name: bsource-network
-#     driver: bridge
-#     external: true
+volumes:
+  backup-state:

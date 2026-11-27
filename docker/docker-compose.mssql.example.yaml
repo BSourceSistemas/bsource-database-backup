@@ -1,0 +1,61 @@
+services:
+  volume-init:
+    image: alpine:3.21.3
+    user: "0:0"
+    command: ["sh", "-c", "touch /backup/.bsource-volume && chown 10001:2000 /backup /backup/.bsource-volume && chmod 2770 /backup"]
+    volumes:
+      - mssql-backups:/backup
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-CU20-ubuntu-22.04
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["export MSSQL_SA_PASSWORD=$$(cat /run/secrets/sqlserver_password); exec /opt/mssql/bin/sqlservr"]
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+    secrets:
+      - sqlserver_password
+    volumes:
+      - mssql-backups:/var/opt/mssql/backup
+    group_add:
+      - "2000"
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+
+  backup:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      DB_TYPE: mssql
+      DB_HOST: sqlserver
+      DB_PORT: "1433"
+      DB_USER: sa
+      DB_PASSWORD_FILE: /run/secrets/sqlserver_password
+      DB_DATABASE: AppTreino
+      MSSQL_BACKUP_MODE: shared-volume
+      MSSQL_SERVER_BACKUP_DIR: /var/opt/mssql/backup
+      MSSQL_LOCAL_BACKUP_DIR: /shared/mssql
+      STORAGE_TYPE: local
+      STORAGE_LOCAL_PATH: /app/backups
+      BACKUP_TIMEZONE: UTC
+    secrets:
+      - sqlserver_password
+    group_add:
+      - "2000"
+    volumes:
+      - mssql-backups:/shared/mssql
+      - backup-state:/var/lib/bsource-backup
+      - local-backups:/app/backups
+    depends_on:
+      - sqlserver
+
+secrets:
+  sqlserver_password:
+    file: ./secrets/sqlserver_password.txt
+
+volumes:
+  mssql-backups:
+  backup-state:
+  local-backups:

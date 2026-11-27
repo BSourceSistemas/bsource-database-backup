@@ -55,8 +55,8 @@ venv.bak/
 *.log
 logs/
 
-# Docker
-.dockerignore
+# Configurações Docker locais que podem conter credenciais
+docker/docker-compose.yescredenciamento.yaml
 
 # OS
 .DS_Store

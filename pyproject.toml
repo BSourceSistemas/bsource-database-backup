@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools==75.8.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bsource-database-backup"
+version = "4.0.0"
+description = "Secure, observable single-database backup service"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "APScheduler==3.11.0",
+  "boto3==1.37.18",
+  "croniter==6.0.0",
+  "fastapi==0.115.11",
+  "prometheus-client==0.21.1",
+  "pydantic==2.10.6",
+  "pymongo==4.11.2",
+  "python-dotenv==1.0.1",
+  "seqlog==0.4.3",
+  "tzdata==2025.1",
+  "uvicorn==0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx==0.28.1",
+  "mypy==1.15.0",
+  "pytest==8.3.5",
+  "pytest-cov==6.0.0",
+  "ruff==0.9.10",
+]
+
+[project.scripts]
+backup = "app.cli:main"
+
+[tool.setuptools]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true

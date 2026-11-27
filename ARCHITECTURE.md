@@ -1,118 +1,49 @@
 # Arquitetura
 
-## 📂 Estrutura do Projeto
+## Invariantes
 
-```
-├── app/
-│   ├── __init__.py              # Pacote Python
-│   ├── main.py                  # Aplicação principal (scheduler + orquestração)
-│   ├── db_dumper.py             # Abstração de dump de bases de dados
-│   ├── storage_provider.py      # Abstração de storage providers
-│   ├── email_helper.py          # Auxiliar para envio de emails
-│   ├── requirements.txt         # Dependências Python
-│   └── backups/                 # Backups locais temporários
-├── docker/
-│   ├── docker-compose.yaml      # Configuração Docker Compose
-│   └── Dockerfile               # Imagem Docker
-├── .env.example                 # Exemplo de configuração
-└── .gitignore                   # Arquivos ignorados pelo Git
-```
+- Uma instância contém uma configuração e protege um banco.
+- O dump só é bem-sucedido depois da validação e da confirmação do objeto.
+- Notificação e backup possuem resultados independentes.
+- Nenhum cliente é executado por shell e nenhuma senha entra em `argv`.
+- Arquivos intermediários são privados, exclusivos por execução e sempre limpos.
 
-## 🏗️ Diagrama de Arquitetura
+## Componentes
 
-```
-                    ┌───────────────────┐
-                    │      main.py      │  (scheduler + orquestração)
-                    └─────┬───────┬─────┘
-                          │       │
-              ┌───────────┘       └───────────┐
-              ▼                               ▼
-   ┌─────────────────┐              ┌─────────────────┐
-   │  DatabaseDumper  │ (ABC)       │ StorageProvider  │ (ABC)
-   ├─────────────────┤              ├─────────────────┤
-   │ PostgresDumper   │              │ S3StorageProvider│ (ABC)
-   │ MySQLDumper      │              │  ├─ R2Storage    │
-   │ MSSQLDumper      │              │  └─ S3Storage    │
-   │ MongoDumper      │              │ LocalStorage     │
-   └─────────────────┘              └─────────────────┘
+```text
+CLI / FastAPI / APScheduler
+            |
+      BackupExecutor
+       /    |     \
+ Database  Storage  Notifier
+  Dumper   Provider
+            |
+     BackupStateStore
 ```
 
-## 🔄 Fluxo de Execução
+`BackupExecutor` é o único dono do pipeline. CLI e scheduler apenas o disparam. `BackupStateStore` usa substituição atômica e permite que `/status` sobreviva a reinicializações quando seu diretório é persistido.
 
-1. **Scheduler** dispara `gerar_backup()` via expressão CRON (também executa imediatamente ao iniciar)
-2. **DatabaseDumper** executa a ferramenta CLI correspondente ao `DB_TYPE` e gera o arquivo de backup em `/tmp`
-3. **StorageProvider** faz upload do arquivo para o bucket configurado, organizando em pastas por data (`YYYYMMDD`)
-4. **Email** envia notificação de sucesso ou erro
-5. **Cleanup** remove o arquivo de backup local
+## Pipeline
 
-## 🗄️ Bases de Dados Suportadas
+```text
+configuration -> preflight -> connection -> dump -> validation
+              -> upload -> upload-verification -> notification -> cleanup
+```
 
-| DB_TYPE | Engine | Ferramenta CLI | Extensão | Notas |
-|---------|--------|---------------|----------|-------|
-| `postgres` | PostgreSQL | `pg_dump` | `.sql` | Formato custom (`-F c`) com blobs |
-| `mysql` | MySQL | `mysqldump` | `.sql` | Single-transaction, routines, triggers |
-| `mariadb` | MariaDB | `mysqldump` | `.sql` | Mesma ferramenta que MySQL — retrocompatível |
-| `mssql` | SQL Server | `sqlcmd` | `.bak` | `BACKUP DATABASE` com compressão |
-| `mongodb` | MongoDB | `mongodump` | `.gz` | Archive comprimido com gzip; `DB_AUTH_SOURCE` configurável |
+Uma etapa obrigatória interrompe as seguintes. Notification e cleanup são best-effort, preservando o erro obrigatório original. Upload e verificação são retentados; dump não é.
 
-### DatabaseDumper (ABC)
+## SQL Server
 
-Cada implementação encapsula:
-- O comando CLI e suas flags específicas
-- A gestão de credenciais (ex: `PGPASSWORD` para PostgreSQL)
-- A extensão do arquivo de backup
-- Metadados identificadores (`backup-type`, `database`)
+O modo `shared-volume` possui dois nomes para o mesmo diretório: um visto pelo SQL Server e outro pelo serviço. O SQL Server gera `{runId}.bak`; o serviço exige o arquivo na montagem local e o servidor executa `RESTORE VERIFYONLY WITH CHECKSUM`. Isso prova acesso ao artefato sem depender de `localhost`, que não atravessa contêineres.
 
-A factory `create_dumper_from_env()` seleciona a implementação com base na variável `DB_TYPE`.
+## Estado e health
 
-## ☁️ Storage Providers
+O estado contém somente timestamps, contadores e o último `BackupRun` sanitizado. `/health/live` mede processo/scheduler; `/health/ready` mede capacidade local; `/status` avalia idade do último sucesso, falhas consecutivas, scheduler e timeout da execução atual.
 
-| STORAGE_TYPE | Provider | Região | Endpoint |
-|--------------|----------|--------|----------|
-| `r2` | Cloudflare R2 | `auto` (fixo) | Obrigatório |
-| `s3` | AWS S3 | Configurável (`STORAGE_REGION`) | Opcional |
-| `local` | Disco local | — | — |
+## Segurança operacional
 
-### StorageProvider (ABC)
-
-`S3StorageProvider` (subclasse de `StorageProvider`) é a base para providers S3-compatible (`R2Storage` e `S3Storage`), utilizando `boto3` com:
-- **Lazy loading** do client S3 — criado apenas no primeiro uso
-- **Organização por data** — arquivos agrupados em `destination_folder/YYYYMMDD/filename`
-- **Metadados** — cada upload inclui tipo de backup, database, timestamp e timezone
-
-`LocalStorage` (subclasse de `StorageProvider`) grava os backups diretamente no disco:
-- **Organização por data** — arquivos agrupados em `STORAGE_LOCAL_PATH/YYYYMMDD/filename`
-- **Metadados** — ignorados (não aplicável para armazenamento local)
-
-A factory `create_storage_from_env()` seleciona a implementação com base na variável `STORAGE_TYPE`.
-
-## 📊 Monitoramento
-
-- **SEQ** (opcional): Logging estruturado enviado para SEQ se `SEQ_URL` estiver configurado
-- **Console**: Logs no stdout sempre ativos, independente do SEQ
-- **Email**: Notificações SMTP de sucesso/erro com timestamp local
-- **Metadados**: Informações de auditoria armazenadas junto ao arquivo de backup no storage
-
-## 🛠️ Tecnologias
-
-| Componente | Tecnologia |
-|------------|------------|
-| Linguagem | Python 3.11 |
-| Scheduler | APScheduler (CronTrigger) |
-| Storage SDK | boto3 (S3-compatible) |
-| Logging | seqlog (opcional) + logging stdlib |
-| Email | smtplib (SMTP + TLS) |
-| Configuração | python-dotenv (.env) |
-| Container | Docker (python:3.11-slim) |
-| DB Clients | pg_dump, mysqldump, sqlcmd, mongodump |
-
-## 🐳 Docker
-
-A imagem Docker (`python:3.11-slim`) inclui todos os clientes de base de dados:
-
-- `postgresql-client` — para `pg_dump`
-- `default-mysql-client` — para `mysqldump` (compatível com MySQL e MariaDB)
-- `mssql-tools18` + `msodbcsql18` — para `sqlcmd` (SQL Server)
-- `mongodb-database-tools` — para `mongodump` (MongoDB)
-
-A imagem é executada com um usuário não-root (`backup`) por segurança. O tipo de base de dados a utilizar é selecionado via `DB_TYPE` no `.env` — a mesma imagem serve para qualquer engine.
+- API interna sem autenticação.
+- Um worker Uvicorn, uma réplica e `max_instances=1`.
+- Imagem não-root e inicialmente `amd64`.
+- Retenção é responsabilidade de lifecycle do bucket.
+- Object keys preservam case, codificam segmentos inseguros e incluem UUID.
