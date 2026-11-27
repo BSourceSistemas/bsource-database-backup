@@ -69,6 +69,7 @@ class BackupConfig(BaseModel):
     email_port: int = Field(default=587, ge=1, le=65535)
     email_user: str | None = None
     email_password: str | None = None
+    email_auth_mode: str = "credentials"
     email_starttls: bool = True
     webhook_url: str | None = None
     seq_url: str | None = None
@@ -77,7 +78,7 @@ class BackupConfig(BaseModel):
     mssql_server_backup_dir: str | None = None
     mssql_local_backup_dir: Path | None = None
 
-    @field_validator("database_type", "storage_type", "run_mode", "notification_provider")
+    @field_validator("database_type", "storage_type", "run_mode", "notification_provider", "email_auth_mode")
     @classmethod
     def lower_token(cls, value: str) -> str:
         return value.lower().strip()
@@ -119,10 +120,13 @@ class BackupConfig(BaseModel):
                 raise ValueError("invalid STORAGE_ENDPOINT_URL")
         if self.notification_provider not in {"noop", "email", "webhook"}:
             raise ValueError("unsupported NOTIFICATION_PROVIDER")
-        if self.notification_provider == "email" and not all(
-            (self.email_from, self.email_to, self.email_smtp, self.email_user, self.email_password)
-        ):
-            raise ValueError("complete EMAIL_* configuration is required")
+        if self.email_auth_mode not in {"credentials", "none"}:
+            raise ValueError("EMAIL_AUTH_MODE must be credentials or none")
+        if self.notification_provider == "email":
+            if not all((self.email_from, self.email_to, self.email_smtp)):
+                raise ValueError("EMAIL_FROM, EMAIL_TO and EMAIL_SMTP are required")
+            if self.email_auth_mode == "credentials" and not all((self.email_user, self.email_password)):
+                raise ValueError("EMAIL_USER and EMAIL_PASSWORD are required for EMAIL_AUTH_MODE=credentials")
         if self.notification_provider == "webhook" and not self.webhook_url:
             raise ValueError("WEBHOOK_URL is required")
         if self.database_type == "mssql":
@@ -209,10 +213,11 @@ def load_config(environ: Mapping[str, str] | None = None) -> BackupConfig:
             extra={"Event": "DeprecatedConfiguration", "Stage": "configuration"},
         )
     recipients = tuple(item.strip() for item in env.get("EMAIL_TO", "").split(",") if item.strip())
+    auth_mode = env.get("EMAIL_AUTH_MODE", "credentials").lower().strip()
     provider = env.get("NOTIFICATION_PROVIDER")
     if provider is None:
-        email_complete = all(
-            (env.get("EMAIL_FROM"), recipients, env.get("EMAIL_SMTP"), env.get("EMAIL_USER"), secrets["EMAIL_PASSWORD"])
+        email_complete = all((env.get("EMAIL_FROM"), recipients, env.get("EMAIL_SMTP"))) and (
+            auth_mode == "none" or all((env.get("EMAIL_USER"), secrets["EMAIL_PASSWORD"]))
         )
         provider = "email" if email_complete else "noop"
     try:
@@ -259,6 +264,7 @@ def load_config(environ: Mapping[str, str] | None = None) -> BackupConfig:
             email_port=_int(env, "EMAIL_PORT", 587),
             email_user=env.get("EMAIL_USER"),
             email_password=secrets["EMAIL_PASSWORD"],
+            email_auth_mode=auth_mode,
             email_starttls=_bool(env, "EMAIL_STARTTLS", True),
             webhook_url=env.get("WEBHOOK_URL"),
             seq_url=env.get("SEQ_URL"),

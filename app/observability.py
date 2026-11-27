@@ -12,6 +12,9 @@ from prometheus_client import Counter, Gauge, Histogram
 
 from .config import BackupConfig
 
+BACKUP_NOTIFICATIONS = Counter(
+    "backup_notifications_total", "Notification outcomes after retries", ["provider", "status"]
+)
 BACKUP_RUNS = Counter("backup_runs_total", "Backup executions", ["database_type", "status"])
 BACKUP_FAILURES = Counter("backup_failures_total", "Backup failures", ["database_type", "stage"])
 BACKUP_DURATION = Histogram("backup_duration_seconds", "Backup duration", ["database_type"])

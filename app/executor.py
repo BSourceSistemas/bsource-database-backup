@@ -19,7 +19,7 @@ from .config import BackupConfig
 from .db_dumper import DatabaseDumper, create_dumper
 from .errors import BackupError, stage_exit_code
 from .models import BackupResult, BackupRun, NotificationStatus, RunStatus, StageResult, utcnow
-from .notifier import NoOpNotifier, Notifier, create_notifier
+from .notifier import NoOpNotifier, Notifier, create_notifier, notification_error_type
 from .observability import (
     BACKUP_CONSECUTIVE_FAILURES,
     BACKUP_DURATION,
@@ -27,6 +27,7 @@ from .observability import (
     BACKUP_FILE_SIZE,
     BACKUP_LAST_ATTEMPT,
     BACKUP_LAST_SUCCESS,
+    BACKUP_NOTIFICATIONS,
     BACKUP_RUNNING,
     BACKUP_RUNS,
     BACKUP_UPLOAD_DURATION,
@@ -184,6 +185,8 @@ class BackupExecutor:
             file_size_bytes=run.file_size_bytes,
             duration_ms=run.duration_ms,
             error=self._error_payload(failure) if failure else None,
+            notification_status=run.notification_status,
+            notification_error_type=run.notification_error_type,
         )
 
     def _stage(self, run: BackupRun, name: str, operation: Callable[[], T]) -> T:
@@ -258,9 +261,18 @@ class BackupExecutor:
             run.notification_status = NotificationStatus.SENT
             self.state.record_notification(event)
             self._event("NotificationSent", run, Success=True)
-        except Exception:
+        except Exception as exc:
             run.notification_status = NotificationStatus.FAILED
-            self._event("NotificationFailed", run, Success=False, ErrorType="NotificationFailed")
+            run.notification_error_type = notification_error_type(exc)
+            self._event(
+                "NotificationFailed",
+                run,
+                level=logging.ERROR,
+                Success=False,
+                ErrorType=run.notification_error_type,
+            )
+        finally:
+            BACKUP_NOTIFICATIONS.labels(self.config.notification_provider, run.notification_status.value).inc()
 
     def _object_key(self, run: BackupRun) -> str:
         prefix = self.config.storage_destination_folder.strip("/")
@@ -296,7 +308,7 @@ class BackupExecutor:
         elif run.status == RunStatus.FAILED:
             BACKUP_FAILURES.labels(self.dumper.database_type, run.stage).inc()
 
-    def _event(self, event: str, run: BackupRun, **properties: Any) -> None:
+    def _event(self, event: str, run: BackupRun, *, level: int = logging.INFO, **properties: Any) -> None:
         extra = {
             "Event": event,
             "BackupRunId": run.run_id,
@@ -308,4 +320,4 @@ class BackupExecutor:
             "StorageType": self.storage.storage_type,
             **properties,
         }
-        self.log.info(event, extra=extra)
+        self.log.log(level, event, extra=extra)

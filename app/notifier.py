@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import smtplib
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -30,8 +31,6 @@ class EmailNotifier(Notifier):
 
     def send(self, event: str, payload: dict[str, Any]) -> None:
         assert self.config.email_smtp is not None
-        assert self.config.email_user is not None
-        assert self.config.email_password is not None
         message = EmailMessage()
         message["From"] = self.config.email_from
         message["To"] = ", ".join(self.config.email_to)
@@ -40,9 +39,14 @@ class EmailNotifier(Notifier):
         message.set_content(json.dumps(safe_payload, ensure_ascii=False, indent=2))
         with smtplib.SMTP(self.config.email_smtp, self.config.email_port, timeout=30) as server:
             if self.config.email_starttls:
-                server.starttls()
-            server.login(self.config.email_user, self.config.email_password)
-            server.send_message(message)
+                server.starttls(context=ssl.create_default_context())
+            if self.config.email_auth_mode == "credentials":
+                assert self.config.email_user is not None
+                assert self.config.email_password is not None
+                server.login(self.config.email_user, self.config.email_password)
+            refused = server.send_message(message)
+            if refused:
+                raise smtplib.SMTPRecipientsRefused(refused)
 
 
 class WebhookNotifier(Notifier):
@@ -84,3 +88,24 @@ def create_notifier(config: BackupConfig) -> Notifier:
     if config.notification_provider == "webhook":
         return RetryingNotifier(WebhookNotifier(config.webhook_url or ""))
     return NoOpNotifier()
+
+
+def notification_error_type(error: Exception) -> str:
+    """Return a bounded category, never SMTP response text or recipient details."""
+    if isinstance(error, ssl.SSLError):
+        return "NotificationTLSFailed"
+    if isinstance(error, TimeoutError):
+        return "NotificationTimeout"
+    if isinstance(error, smtplib.SMTPAuthenticationError):
+        return "NotificationAuthenticationFailed"
+    if isinstance(error, smtplib.SMTPRecipientsRefused):
+        return "NotificationRecipientsRefused"
+    if isinstance(error, smtplib.SMTPNotSupportedError):
+        return "NotificationCapabilityUnsupported"
+    if isinstance(error, smtplib.SMTPConnectError | smtplib.SMTPServerDisconnected | ConnectionError):
+        return "NotificationConnectionFailed"
+    if isinstance(error, smtplib.SMTPException):
+        return "NotificationSendFailed"
+    if isinstance(error, OSError):
+        return "NotificationConnectionFailed"
+    return "NotificationFailed"

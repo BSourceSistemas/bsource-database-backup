@@ -32,6 +32,34 @@ def test_postgres_uses_arguments_and_scoped_password(config_factory, tmp_path: P
     assert kwargs["env"] == {"PGPASSWORD": "S3cr3t ! value"}
 
 
+@pytest.mark.parametrize("version", ["16.16", "16.14"])
+def test_postgres_requires_client_16(config_factory, version):
+    runner = RecordingRunner([(f"pg_dump (PostgreSQL) {version}", "")])
+    assert PostgreSQLDumper(config_factory(), runner).check_client_version() == version
+
+
+@pytest.mark.parametrize("output", ["pg_dump (PostgreSQL) 17.11", "pg_dump (PostgreSQL) 15.18", "unknown"])
+def test_postgres_rejects_wrong_client(config_factory, output):
+    runner = RecordingRunner([(output, "")])
+    with pytest.raises(BackupError) as error:
+        PostgreSQLDumper(config_factory(), runner).check_client_version()
+    assert error.value.error_type == "IncompatibleClient"
+
+
+@pytest.mark.parametrize("version", [150018, 160014])
+def test_postgres_accepts_supported_source(config_factory, tmp_path, version):
+    runner = RecordingRunner([(str(version), "")])
+    assert PostgreSQLDumper(config_factory(), runner).check_connection(tmp_path) == str(version // 10000)
+
+
+@pytest.mark.parametrize("version", [140000, 170000, 180000])
+def test_postgres_rejects_unsupported_source(config_factory, tmp_path, version):
+    runner = RecordingRunner([(str(version), "")])
+    with pytest.raises(BackupError) as error:
+        PostgreSQLDumper(config_factory(), runner).check_connection(tmp_path)
+    assert error.value.error_type == "IncompatibleServer"
+
+
 def test_mysql_uses_restricted_option_file(config_factory, tmp_path: Path):
     runner = RecordingRunner()
     dumper = MySQLDumper(config_factory(database_type="mysql", port=3306), runner)

@@ -53,6 +53,7 @@ class BackupRun:
     error_type: str | None = None
     sanitized_error: str | None = None
     notification_status: NotificationStatus = NotificationStatus.NOT_REQUESTED
+    notification_error_type: str | None = None
     stages: list[StageResult] = field(default_factory=list)
 
     def finish(self, status: RunStatus) -> None:
@@ -85,3 +86,5 @@ class BackupResult:
     file_size_bytes: int | None = None
     duration_ms: int | None = None
     error: dict[str, Any] | None = None
+    notification_status: NotificationStatus = NotificationStatus.NOT_REQUESTED
+    notification_error_type: str | None = None

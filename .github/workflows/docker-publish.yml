@@ -14,6 +14,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Require matching version tag
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          if os.environ["RELEASE_REF"] != f"refs/tags/v{version}":
+              raise SystemExit("Publish from the version tag matching pyproject.toml")
+          PYTHON
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
@@ -44,7 +55,7 @@ jobs:
           load: true
           tags: bsource-database-backup:release-candidate
           cache-from: type=gha
-      - uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: bsource-database-backup:release-candidate
           severity: CRITICAL
@@ -74,3 +85,16 @@ jobs:
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: cosign sign --yes "bsourcedev/bsource-database-backup@${DIGEST}"
+      - name: Record immutable release reference
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          {
+            echo "### Published image"
+            echo "Version: ${VERSION}"
+            echo "Commit: ${GITHUB_SHA}"
+            echo "Image: bsourcedev/bsource-database-backup:${VERSION}"
+            echo "Digest: bsourcedev/bsource-database-backup@${DIGEST}"
+            echo "VPS relay and real R2 restore acceptance: pending operator validation."
+          } >> "$GITHUB_STEP_SUMMARY"
