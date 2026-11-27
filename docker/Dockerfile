@@ -35,9 +35,9 @@ RUN test "$(dpkg --print-architecture)" = "amd64" && \
 
 # Oracle's generic minimal distribution is kept separate from MariaDB binaries.
 RUN curl -fsSL -o /tmp/mysql.tar.xz \
-      "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-${MYSQL_VERSION}-linux-glibc2.28-x86_64-minimal.tar.xz" && \
+      "https://cdn.mysql.com/archives/mysql-8.4/mysql-${MYSQL_VERSION}-linux-glibc2.28-x86_64-minimal.tar.xz" && \
     curl -fsSL -o /tmp/mysql.tar.xz.asc \
-      "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-${MYSQL_VERSION}-linux-glibc2.28-x86_64-minimal.tar.xz.asc" && \
+      "https://cdn.mysql.com/archives/mysql-8.4/mysql-${MYSQL_VERSION}-linux-glibc2.28-x86_64-minimal.tar.xz.asc" && \
     curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2025 | gpg --import && \
     gpg --batch --verify /tmp/mysql.tar.xz.asc /tmp/mysql.tar.xz && \
     mkdir -p /opt/mysql84 && \
